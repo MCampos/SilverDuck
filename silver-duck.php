@@ -44,7 +44,7 @@ class Silver_Duck {
         return [
             'enabled'             => 1,
             'api_key'             => '',
-            'model'               => 'meta-llama/llama-3.2-11b-instruct:free',
+            'model'      => 'meta-llama/llama-3.2-3b-instruct:free',
             'confidence'          => 0.85,
             'auto_action'         => 'spam', // spam|hold
             'timeout'             => 15,
