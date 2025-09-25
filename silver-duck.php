@@ -608,8 +608,19 @@ class Silver_Duck {
                     }
                 }
                 $json = json_decode($body, true);
-                $content = $json['choices'][0]['message']['content'] ?? '';
-                $tokens  = intval($json['usage']['total_tokens'] ?? 0);
+                $tokens = 0;
+                $content = '';
+                if (is_array($json)) {
+                    $tokens = intval($json['usage']['total_tokens'] ?? 0);
+                    if (isset($json['choices']) && is_array($json['choices']) && isset($json['choices'][0]) && is_array($json['choices'][0])) {
+                        $choice0 = $json['choices'][0];
+                        if (isset($choice0['message']) && is_array($choice0['message'])) {
+                            $content = (string)($choice0['message']['content'] ?? '');
+                        } elseif (isset($choice0['text'])) {
+                            $content = (string)$choice0['text'];
+                        }
+                    }
+                }
 
                 $content = trim($content);
                 if (preg_match('/\{.*\}/s', $content, $m)) $content = $m[0];
@@ -621,7 +632,7 @@ class Silver_Duck {
                     $reasons    = is_array($parsed['reasons'] ?? null) ? array_slice(array_map('strval', $parsed['reasons']), 0, 6) : [];
                 } else {
                     // fallback parse
-                    $low = mb_strtolower((string)$content, 'UTF-8');
+                    $low = $this->sd_mb_strtolower((string)$content);
                     if (strpos($low, 'spam') !== false && strpos($low, 'valid') === false) {
                         $decision = 'spam'; $confidence = 0.85; $reasons = ['fallback parse'];
                     } else {
@@ -682,10 +693,10 @@ class Silver_Duck {
         $data['reasons'] = $reasons ? maybe_serialize($reasons) : null;
         $formats[] = '%s';
 
-        $data['raw_response'] = $raw_response ? mb_substr($raw_response, 0, 5000) : null;
+        $data['raw_response'] = $raw_response ? $this->sd_mb_substr($raw_response, 0, 5000) : null;
         $formats[] = '%s';
 
-        $data['error'] = $error ? mb_substr($error, 0, 1000) : null;
+        $data['error'] = $error ? $this->sd_mb_substr($error, 0, 1000) : null;
         $formats[] = '%s';
 
         $wpdb->insert($table, $data, $formats);
@@ -860,6 +871,39 @@ class Silver_Duck {
         echo '</div>';
     }
 
+    /* ------------------------------- helpers ------------------------------- */
+    /** mb_strtolower wrapper that falls back to strtolower if mbstring is unavailable */
+    protected function sd_mb_strtolower($text) {
+        if (function_exists('mb_strtolower')) {
+            return mb_strtolower((string)$text, 'UTF-8');
+        }
+        return strtolower((string)$text);
+    }
+
+    /** mb_substr wrapper with fallback */
+    protected function sd_mb_substr($text, $start, $length = null) {
+        if (function_exists('mb_substr')) {
+            return $length === null ? mb_substr((string)$text, (int)$start) : mb_substr((string)$text, (int)$start, (int)$length);
+        }
+        return $length === null ? substr((string)$text, (int)$start) : substr((string)$text, (int)$start, (int)$length);
+    }
+
+    /** mb_strlen wrapper with fallback */
+    protected function sd_mb_strlen($text) {
+        if (function_exists('mb_strlen')) {
+            return mb_strlen((string)$text, 'UTF-8');
+        }
+        return strlen((string)$text);
+    }
+
+    /** mb_stripos wrapper with fallback */
+    protected function sd_mb_stripos($haystack, $needle) {
+        if (function_exists('mb_stripos')) {
+            return mb_stripos((string)$haystack, (string)$needle, 0, 'UTF-8');
+        }
+        return stripos((string)$haystack, (string)$needle);
+    }
+
     /** Minimal disposable email domain set (extend via settings with your own blacklist too) */
     protected function is_disposable_domain($domain) {
         static $set = null;
@@ -905,15 +949,15 @@ class Silver_Duck {
         $parts[] = "Conclusion: {$outro}";
 
         $ctx = implode("\n", $parts);
-        if (mb_strlen($ctx) > $limitChars) {
-            $ctx = mb_substr($ctx, 0, $limitChars);
+        if ($this->sd_mb_strlen($ctx) > $limitChars) {
+            $ctx = $this->sd_mb_substr($ctx, 0, $limitChars);
         }
         return $ctx;
     }
 
     /** Extract simple keywords from a comment (lowercase, stopword-pruned) */
     protected function keywords_from_comment($text, $max = 12) {
-        $t = mb_strtolower((string)$text, 'UTF-8');
+        $t = function_exists('mb_strtolower') ? mb_strtolower((string)$text, 'UTF-8') : strtolower((string)$text);
         $tokens = preg_split('/[^\p{L}\p{N}]+/u', $t, -1, PREG_SPLIT_NO_EMPTY);
         $stop = array_flip([
                 'the','a','an','and','or','but','if','then','else','when','at','by','for','in','of','on','to','with','from','is','it','this','that','these','those','i','you','he','she','we','they','me','him','her','us','them','are','was','were','be','been','am','as','my','our','your','their'
@@ -943,16 +987,16 @@ class Silver_Duck {
     /** Take a ~window of content around the first matching keyword */
     protected function window_around_keywords($text, $keywords, $win = 700) {
         if (empty($keywords)) return '';
-        $low = mb_strtolower((string)$text, 'UTF-8');
+        $low = $this->sd_mb_strtolower((string)$text);
         $pos = -1;
         foreach ($keywords as $k) {
-            $p = mb_stripos($low, mb_strtolower($k, 'UTF-8'));
+            $p = $this->sd_mb_stripos($low, $this->sd_mb_strtolower($k));
             if ($p !== false) { $pos = $p; break; }
         }
         if ($pos === -1) return '';
         $half = (int) floor($win / 2);
         $start = max(0, $pos - $half);
-        $snippet = mb_substr($text, $start, $win);
+        $snippet = $this->sd_mb_substr($text, $start, $win);
         // Trim to word boundaries-ish
         $snippet = preg_replace('/^\S*\s/', '', $snippet); // drop partial first word
         $snippet = preg_replace('/\s\S*$/', '', $snippet); // drop partial last word
