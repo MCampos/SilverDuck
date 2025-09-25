@@ -1,21 +1,21 @@
 name: Build & Release Silver Duck
 
-# ✅ Give the workflow permission to create releases
 permissions:
-  contents: write
+  contents: write  # required to create releases
 
 on:
   push:
-    branches: [ "main" ]        # builds ZIP on pushes to main (artifact only)
+    branches: [ "main" ]     # build ZIP on pushes to main (artifact only)
     tags:
-      - "v*"                    # full release when pushing tags like v1.0.0
-  workflow_dispatch: {}          # manual run (builds artifact; release job still gated below)
+      - "v*"                 # full release on tags like v1.0.0
+  workflow_dispatch: {}       # manual run (artifact only)
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Verify required files exist
         run: |
@@ -26,8 +26,8 @@ jobs:
         id: versions
         shell: bash
         run: |
-          PHP_VERSION="$(grep -Eo '^\s*\*\s*Version:\s*[0-9]+\.[0-9]+\.[0-9]+' silver-duck.php | awk '{print $3}')"
-          README_VERSION="$(grep -Eo '^Stable tag:\s*[0-9]+\.[0-9]+\.[0-9]+' readme.txt | awk '{print $3}' || true)"
+          PHP_VERSION="$(grep -Eo '^\s*\*\s*Version:\s*[0-9]+\.[0-9]+\.[0-9]+' silver-duck.php | head -1 | sed -E 's/.*Version:\s*//')"
+          README_VERSION="$(grep -Eo '^Stable tag:\s*[0-9]+\.[0-9]+\.[0-9]+' readme.txt | head -1 | sed -E 's/^Stable tag:\s*//' || true)"
           echo "php_version=$PHP_VERSION" >> $GITHUB_OUTPUT
           echo "readme_version=$README_VERSION" >> $GITHUB_OUTPUT
 
@@ -63,10 +63,19 @@ jobs:
 
   release:
     needs: build
-    if: startsWith(github.ref, 'refs/tags/')   # only run on tag pushes like v1.0.0
+    if: startsWith(github.ref, 'refs/tags/')   # only on tags like v1.0.0
     runs-on: ubuntu-latest
-    # (Optional) also scope permissions here; redundant with top-level but harmless:
-    permissions:
-      contents: write
     steps:
-      - uses:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: silver-duck
+          path: .
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          files: silver-duck.zip
+          generate_release_notes: true
