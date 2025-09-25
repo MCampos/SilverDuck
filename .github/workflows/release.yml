@@ -1,11 +1,15 @@
 name: Build & Release Silver Duck
 
+# ✅ Give the workflow permission to create releases
+permissions:
+  contents: write
+
 on:
   push:
-    branches: [ "main" ]     # build on every push to main (optional)
+    branches: [ "main" ]        # builds ZIP on pushes to main (artifact only)
     tags:
-      - "v*"                 # build/release when you push a tag like v1.0.0
-  workflow_dispatch: {}       # allow manual run from Actions tab
+      - "v*"                    # full release when pushing tags like v1.0.0
+  workflow_dispatch: {}          # manual run (builds artifact; release job still gated below)
 
 jobs:
   build:
@@ -22,7 +26,7 @@ jobs:
         id: versions
         shell: bash
         run: |
-          PHP_VERSION="$(grep -Eo '^ \* Version:\s*[0-9]+\.[0-9]+\.[0-9]+' silver-duck.php | awk '{print $3}')"
+          PHP_VERSION="$(grep -Eo '^\s*\*\s*Version:\s*[0-9]+\.[0-9]+\.[0-9]+' silver-duck.php | awk '{print $3}')"
           README_VERSION="$(grep -Eo '^Stable tag:\s*[0-9]+\.[0-9]+\.[0-9]+' readme.txt | awk '{print $3}' || true)"
           echo "php_version=$PHP_VERSION" >> $GITHUB_OUTPUT
           echo "readme_version=$README_VERSION" >> $GITHUB_OUTPUT
@@ -32,6 +36,9 @@ jobs:
         run: |
           TAG="${GITHUB_REF#refs/tags/}"     # v1.0.0
           TAG_VERSION="${TAG#v}"             # 1.0.0
+          echo "Tag: $TAG"
+          echo "Plugin header Version: ${{ steps.versions.outputs.php_version }}"
+          echo "readme Stable tag:    ${{ steps.versions.outputs.readme_version }}"
           test "${{ steps.versions.outputs.php_version }}" = "$TAG_VERSION"
           if [ -n "${{ steps.versions.outputs.readme_version }}" ]; then
             test "${{ steps.versions.outputs.readme_version }}" = "$TAG_VERSION"
@@ -56,16 +63,10 @@ jobs:
 
   release:
     needs: build
-    if: startsWith(github.ref, 'refs/tags/')   # only on tags like v1.0.0
+    if: startsWith(github.ref, 'refs/tags/')   # only run on tag pushes like v1.0.0
     runs-on: ubuntu-latest
+    # (Optional) also scope permissions here; redundant with top-level but harmless:
+    permissions:
+      contents: write
     steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: silver-duck
-          path: .
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: silver-duck.zip
-          generate_release_notes: true
+      - uses:
