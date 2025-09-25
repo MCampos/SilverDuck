@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Silver Duck (OpenRouter - Llama 3.2)
  * Description: Classifies WordPress comments as spam/ham using OpenRouter’s Llama 3.2 11B Free. Includes admin settings, logs, and bulk recheck.
- * Version: 1.0.1
+ * Version: 1.0.2
  * Author: Matt Campos
  * License: GPL-2.0-or-later
  * Text Domain: silver-duck
