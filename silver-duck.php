@@ -49,6 +49,8 @@ class Silver_Duck {
                 'confidence'            => 0.85,
                 'auto_action'           => 'spam', // spam|hold
                 'timeout'               => 15,
+                'force_spam_on_llm'     => 0,
+                'auto_approve_valid'    => 0,
 
             // Content heuristics
                 'max_links'             => 2,
@@ -77,7 +79,7 @@ class Silver_Duck {
         $table = $wpdb->prefix . self::TABLE;
         $charset = $wpdb->get_charset_collate();
         require_once ABSPATH . 'wp-admin/includes/upgrade.php';
-        $sql = "CREATE TABLE $table (
+        $sql = "CREATE TABLE `{$table}` (
             id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
             created_at DATETIME NOT NULL,
             comment_id BIGINT UNSIGNED NULL,
@@ -95,9 +97,18 @@ class Silver_Duck {
         ) $charset;";
         dbDelta($sql);
 
-        $opts = get_option(self::OPT_KEY);
-        if (!$opts) add_option(self::OPT_KEY, self::defaults());
-        else update_option(self::OPT_KEY, wp_parse_args($opts, self::defaults()));
+        $existing = get_option(self::OPT_KEY, null);
+        if ($existing === null) {
+            add_option(self::OPT_KEY, self::defaults(), '', 'no');
+        } else {
+            update_option(self::OPT_KEY, wp_parse_args($existing, self::defaults()));
+            // Ensure autoload for secret-containing options is disabled even for pre-existing installs
+            $options_table = $wpdb->options;
+            $row = $wpdb->get_row($wpdb->prepare("SELECT autoload FROM `{$options_table}` WHERE option_name = %s", self::OPT_KEY));
+            if ($row && strtolower((string)$row->autoload) !== 'no') {
+                $wpdb->update($options_table, ['autoload' => 'no'], ['option_name' => self::OPT_KEY]);
+            }
+        }
 
         if (!wp_next_scheduled(self::CRON_HOOK_PURGE)) {
             wp_schedule_event(time() + HOUR_IN_SECONDS, 'daily', self::CRON_HOOK_PURGE);
@@ -117,6 +128,14 @@ class Silver_Duck {
                 'silver-duck',
                 [$this, 'render_settings_page']
         );
+        add_submenu_page(
+                'options-general.php',
+                __('Silver Duck Logs', 'silver-duck'),
+                __('Silver Duck Logs', 'silver-duck'),
+                self::CAP,
+                'silver-duck-logs',
+                [$this, 'render_logs_admin_page']
+        );
     }
 
     /** Register settings/sections/fields */
@@ -135,6 +154,8 @@ class Silver_Duck {
                 ['confidence', 'number', __('Spam threshold (0–1)', 'silver-duck')],
                 ['auto_action', 'select', __('When labeled spam', 'silver-duck')],
                 ['timeout', 'number', __('API timeout (seconds)', 'silver-duck')],
+                ['force_spam_on_llm', 'checkbox', __('Force "Spam" when LLM says spam', 'silver-duck')],
+                ['auto_approve_valid', 'checkbox', __('Auto-approve when LLM says valid', 'silver-duck')],
                 ['run_for_logged_in', 'checkbox', __('Also classify comments from logged-in users', 'silver-duck')],
         ];
         foreach ($core as $f) add_settings_field($f[0], $f[2], [$this, 'render_field'], 'silver-duck', 'sd_core', ['key' => $f[0], 'type' => $f[1]]);
@@ -174,22 +195,25 @@ class Silver_Duck {
     /** Sanitize options */
     public function sanitize_options($input) {
         $d = self::defaults();
+        $prev = wp_parse_args(get_option(self::OPT_KEY), $d);
         return [
                 'enabled'               => empty($input['enabled']) ? 0 : 1,
-                'api_key'               => isset($input['api_key']) ? trim($input['api_key']) : '',
+                'api_key'               => isset($input['api_key']) && trim($input['api_key']) !== '' ? trim($input['api_key']) : (string)($prev['api_key'] ?? ''),
                 'model'                 => isset($input['model']) ? sanitize_text_field($input['model']) : $d['model'],
                 'confidence'            => isset($input['confidence']) ? min(1, max(0, floatval($input['confidence']))) : $d['confidence'],
                 'auto_action'           => in_array($input['auto_action'] ?? 'spam', ['spam','hold'], true) ? $input['auto_action'] : 'spam',
                 'timeout'               => max(3, intval($input['timeout'] ?? $d['timeout'])),
+                'force_spam_on_llm'     => empty($input['force_spam_on_llm']) ? 0 : 1,
+                'auto_approve_valid'    => empty($input['auto_approve_valid']) ? 0 : 1,
 
                 'max_links'             => max(0, intval($input['max_links'] ?? $d['max_links'])),
-                'blacklist'             => isset($input['blacklist']) ? trim(wp_kses_post($input['blacklist'])) : '',
+                'blacklist'             => isset($input['blacklist']) ? sanitize_textarea_field($input['blacklist']) : '',
 
                 'check_author_fields'   => empty($input['check_author_fields']) ? 0 : 1,
                 'disposable_email_check'=> empty($input['disposable_email_check']) ? 0 : 1,
-                'email_domain_blacklist'=> isset($input['email_domain_blacklist']) ? trim(wp_kses_post($input['email_domain_blacklist'])) : '',
-                'url_domain_blacklist'  => isset($input['url_domain_blacklist']) ? trim(wp_kses_post($input['url_domain_blacklist'])) : '',
-                'author_name_blacklist' => isset($input['author_name_blacklist']) ? trim(wp_kses_post($input['author_name_blacklist'])) : '',
+                'email_domain_blacklist'=> isset($input['email_domain_blacklist']) ? sanitize_textarea_field($input['email_domain_blacklist']) : '',
+                'url_domain_blacklist'  => isset($input['url_domain_blacklist']) ? sanitize_textarea_field($input['url_domain_blacklist']) : '',
+                'author_name_blacklist' => isset($input['author_name_blacklist']) ? sanitize_textarea_field($input['author_name_blacklist']) : '',
 
                 'include_post_context'  => empty($input['include_post_context']) ? 0 : 1,
                 'post_context_chars'    => max(200, min(8000, intval($input['post_context_chars'] ?? 2000))),
@@ -212,10 +236,10 @@ class Silver_Duck {
             return;
         }
         if ($type === 'password') {
-            printf('<input type="password" class="regular-text" name="%1$s[%2$s]" value="%3$s" autocomplete="off" />',
-                    esc_attr(self::OPT_KEY), esc_attr($k), esc_attr($opts[$k])
+            printf('<input type="password" class="regular-text" name="%1$s[%2$s]" value="" autocomplete="new-password" placeholder="%3$s" />',
+                    esc_attr(self::OPT_KEY), esc_attr($k), $opts[$k] ? esc_attr(str_repeat('•', 8)) : ''
             );
-            echo '<p class="description">'.esc_html__('Get an API key at openrouter.ai and keep it secret.', 'silver-duck').'</p>';
+            echo '<p class="description">'.esc_html__('Leave blank to keep the existing key. Get an API key at openrouter.ai and keep it secret.', 'silver-duck').'</p>';
             return;
         }
         if ($type === 'number') {
@@ -354,6 +378,7 @@ class Silver_Duck {
             $result = $this->evaluate_comment_for_action(null, $commentdata, false);
             if ($result === 'spam') return 'spam';
             if ($result === 'hold') return 0;
+            if ($result === 'approve') return 1;
         }
         return $approved;
     }
@@ -457,7 +482,15 @@ class Silver_Duck {
         $conf     = floatval($res['confidence']);
         $threshold = floatval($opts['confidence']);
 
-        if ($decision === 'spam' && $conf >= $threshold) return $opts['auto_action'];
+        if ($decision === 'spam') {
+            if (!empty($opts['force_spam_on_llm'])) return 'spam';
+            if ($conf >= $threshold) return $opts['auto_action']; // spam|hold
+            return 'hold'; // conservative action for low-confidence spam
+        }
+        if ($decision === 'valid') {
+            if (!empty($opts['auto_approve_valid'])) return 'approve';
+            return 'none';
+        }
         return 'none';
     }
 
@@ -561,10 +594,19 @@ class Silver_Duck {
                     set_transient(self::BLOCK_TRANSIENT, $until, max(1, $until - time()));
                 }
                 $error = 'rate_limited';
-                continue; // try next model
+                break; // do not try other candidates when globally rate-limited
             }
 
             if ($code >= 200 && $code < 300) {
+                // Respect rate-limit headers even on 2xx: if remaining hits 0, back off until reset
+                $remaining = wp_remote_retrieve_header($resp, 'x-ratelimit-remaining');
+                $reset     = wp_remote_retrieve_header($resp, 'x-ratelimit-reset');
+                if (is_numeric($remaining) && intval($remaining) <= 0 && $reset && is_numeric($reset)) {
+                    $until = (strlen($reset) > 10) ? (int) round(((float)$reset)/1000) : (int)$reset; // ms vs s
+                    if ($until && $until > time()) {
+                        set_transient(self::BLOCK_TRANSIENT, $until, max(1, $until - time()));
+                    }
+                }
                 $json = json_decode($body, true);
                 $content = $json['choices'][0]['message']['content'] ?? '';
                 $tokens  = intval($json['usage']['total_tokens'] ?? 0);
@@ -579,7 +621,7 @@ class Silver_Duck {
                     $reasons    = is_array($parsed['reasons'] ?? null) ? array_slice(array_map('strval', $parsed['reasons']), 0, 6) : [];
                 } else {
                     // fallback parse
-                    $low = strtolower($content);
+                    $low = mb_strtolower((string)$content, 'UTF-8');
                     if (strpos($low, 'spam') !== false && strpos($low, 'valid') === false) {
                         $decision = 'spam'; $confidence = 0.85; $reasons = ['fallback parse'];
                     } else {
@@ -606,20 +648,47 @@ class Silver_Duck {
     protected function log($comment_id, $decision, $confidence, $model, $tokens, $latency_ms, $reasons, $raw_response, $error) {
         global $wpdb;
         $table = $wpdb->prefix . self::TABLE;
-        $wpdb->insert($table, [
-                'created_at'   => current_time('mysql'),
-                'comment_id'   => $comment_id ? intval($comment_id) : null,
-                'decision'     => substr($decision, 0, 10),
-                'confidence'   => $confidence,
-                'model'        => substr((string)$model, 0, 191),
-                'tokens'       => $tokens,
-                'latency_ms'   => $latency_ms,
-                'reasons'      => $reasons ? maybe_serialize($reasons) : null,
-                'raw_response' => $raw_response ? wp_json_encode(mb_substr($raw_response, 0, 5000)) : null,
-                'error'        => $error ? mb_substr($error, 0, 1000) : null,
-        ], [
-                '%s','%d','%s','%f','%s','%d','%d','%s','%s','%s'
-        ]);
+
+        $data = [];
+        $formats = [];
+
+        $data['created_at'] = current_time('mysql');
+        $formats[] = '%s';
+
+        if ($comment_id) {
+            $data['comment_id'] = (int) $comment_id;
+            $formats[] = '%d';
+        }
+
+        $data['decision'] = substr($decision, 0, 10);
+        $formats[] = '%s';
+
+        $data['confidence'] = (float) $confidence;
+        $formats[] = '%f';
+
+        $data['model'] = substr((string) $model, 0, 191);
+        $formats[] = '%s';
+
+        if ($tokens !== null) {
+            $data['tokens'] = (int) $tokens;
+            $formats[] = '%d';
+        }
+
+        if ($latency_ms !== null) {
+            $data['latency_ms'] = (int) $latency_ms;
+            $formats[] = '%d';
+        }
+
+        $data['reasons'] = $reasons ? maybe_serialize($reasons) : null;
+        $formats[] = '%s';
+
+        $data['raw_response'] = $raw_response ? mb_substr($raw_response, 0, 5000) : null;
+        $formats[] = '%s';
+
+        $data['error'] = $error ? mb_substr($error, 0, 1000) : null;
+        $formats[] = '%s';
+
+        $wpdb->insert($table, $data, $formats);
     }
 
     /** Purge logs */
@@ -629,19 +698,116 @@ class Silver_Duck {
         $days = max(0, intval($opts['log_retention_days']));
         if ($days <= 0) return;
         $table = $wpdb->prefix . self::TABLE;
-        $wpdb->query($wpdb->prepare("DELETE FROM $table WHERE created_at < (NOW() - INTERVAL %d DAY)", $days));
+        $wpdb->query($wpdb->prepare("DELETE FROM `{$table}` WHERE created_at < (NOW() - INTERVAL %d DAY)", $days));
     }
 
     /** Logs table (latest 50) */
-    protected function render_logs_table() {
+    public function render_logs_admin_page() {
         if (!current_user_can(self::CAP)) return;
         global $wpdb;
         $table = $wpdb->prefix . self::TABLE;
-        $rows = $wpdb->get_results("SELECT * FROM $table ORDER BY id DESC LIMIT 50", ARRAY_A);
+
+        // Filters
+        $decision   = isset($_GET['decision']) ? sanitize_text_field((string) $_GET['decision']) : '';
+        $has_error  = isset($_GET['has_error']) ? sanitize_text_field((string) $_GET['has_error']) : '';
+        $model_q    = isset($_GET['model']) ? sanitize_text_field((string) $_GET['model']) : '';
+        $comment_id = isset($_GET['comment_id']) ? intval($_GET['comment_id']) : 0;
+        $date_start = isset($_GET['date_start']) ? sanitize_text_field((string) $_GET['date_start']) : '';
+        $date_end   = isset($_GET['date_end']) ? sanitize_text_field((string) $_GET['date_end']) : '';
+
+        // Validate dates (YYYY-MM-DD)
+        if ($date_start && !preg_match('/^\d{4}-\d{2}-\d{2}$/', $date_start)) $date_start = '';
+        if ($date_end   && !preg_match('/^\d{4}-\d{2}-\d{2}$/', $date_end))   $date_end   = '';
+
+        $per_page = 50;
+        $paged = isset($_GET['paged']) ? max(1, intval($_GET['paged'])) : 1;
+        $offset = ($paged - 1) * $per_page;
+
+        $where = [];
+        $params = [];
+        if (in_array($decision, ['spam','valid'], true)) {
+            $where[] = 'decision = %s';
+            $params[] = $decision;
+        }
+        if ($has_error === '1') {
+            $where[] = "(error IS NOT NULL AND error <> '')";
+        } elseif ($has_error === '0') {
+            $where[] = "(error IS NULL OR error = '')";
+        }
+        if ($model_q !== '') {
+            $like = '%' . $wpdb->esc_like($model_q) . '%';
+            $where[] = 'model LIKE %s';
+            $params[] = $like;
+        }
+        if ($comment_id > 0) {
+            $where[] = 'comment_id = %d';
+            $params[] = $comment_id;
+        }
+        if ($date_start) {
+            $where[] = 'created_at >= %s';
+            $params[] = $date_start . ' 00:00:00';
+        }
+        if ($date_end) {
+            $where[] = 'created_at <= %s';
+            $params[] = $date_end . ' 23:59:59';
+        }
+
+        $base = "FROM `{$table}` WHERE 1=1" . ($where ? (' AND ' . implode(' AND ', $where)) : '');
+        $count_sql = 'SELECT COUNT(*) ' . $base;
+        $total = (int) ($params ? $wpdb->get_var($wpdb->prepare($count_sql, $params)) : $wpdb->get_var($count_sql));
+
+        $query_sql = 'SELECT * ' . $base . ' ORDER BY id DESC LIMIT %d OFFSET %d';
+        $params2 = $params;
+        $params2[] = $per_page;
+        $params2[] = $offset;
+        $rows = $wpdb->get_results($wpdb->prepare($query_sql, $params2), ARRAY_A);
+
+        echo '<div class="wrap">';
+        echo '<h1>'.esc_html__('Silver Duck Logs', 'silver-duck').'</h1>';
+
+        // Filter form
+        echo '<form method="get" action="'.esc_url(admin_url('options-general.php')).'" class="sd-log-filters">';
+        echo '<input type="hidden" name="page" value="silver-duck-logs" />';
+        echo '<fieldset style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;margin:12px 0;">';
+        // Decision
+        echo '<label>'.esc_html__('Decision', 'silver-duck').'<br/>';
+        echo '<select name="decision">';
+        $opts_d = ['' => __('All','silver-duck'), 'spam' => 'spam', 'valid' => 'valid'];
+        foreach ($opts_d as $val=>$lab) echo '<option value="'.esc_attr($val).'" '.selected($decision, $val, false).'>'.esc_html($lab).'</option>';
+        echo '</select></label>';
+        // Error
+        echo '<label>'.esc_html__('Errors', 'silver-duck').'<br/>';
+        echo '<select name="has_error">';
+        $opts_e = ['' => __('All','silver-duck'), '1' => __('Errors only','silver-duck'), '0' => __('No errors','silver-duck')];
+        foreach ($opts_e as $val=>$lab) echo '<option value="'.esc_attr($val).'" '.selected($has_error, $val, false).'>'.esc_html($lab).'</option>';
+        echo '</select></label>';
+        // Model
+        echo '<label>'.esc_html__('Model contains', 'silver-duck').'<br/>';
+        echo '<input type="text" name="model" value="'.esc_attr($model_q).'" class="regular-text" />';
+        echo '</label>';
+        // Comment ID
+        echo '<label>'.esc_html__('Comment ID', 'silver-duck').'<br/>';
+        echo '<input type="number" name="comment_id" value="'.esc_attr($comment_id).'" class="small-text" />';
+        echo '</label>';
+        // Date range
+        echo '<label>'.esc_html__('From', 'silver-duck').'<br/>';
+        echo '<input type="date" name="date_start" value="'.esc_attr($date_start).'" />';
+        echo '</label>';
+        echo '<label>'.esc_html__('To', 'silver-duck').'<br/>';
+        echo '<input type="date" name="date_end" value="'.esc_attr($date_end).'" />';
+        echo '</label>';
+        echo '<button class="button button-primary" type="submit">'.esc_html__('Filter','silver-duck').'</button> ';
+        echo '<a class="button" href="'.esc_url(admin_url('options-general.php?page=silver-duck-logs')).'">'.esc_html__('Reset','silver-duck').'</a>';
+        echo '</fieldset>';
+        echo '</form>';
+
         if (!$rows) {
-            echo '<p>'.esc_html__('No logs yet.', 'silver-duck').'</p>';
+            echo '<p>'.esc_html__('No logs found.', 'silver-duck').'</p>';
+            echo '</div>';
             return;
         }
+
+        echo '<p class="description">'.esc_html__('Browse classification logs.', 'silver-duck').'</p>';
         echo '<table class="widefat striped"><thead><tr>';
         $cols = ['created_at'=>'Time','comment_id'=>'Comment','decision'=>'Decision','confidence'=>'Conf.','latency_ms'=>'Latency','model'=>'Model','tokens'=>'Tokens','error'=>'Error'];
         foreach ($cols as $k=>$label) echo '<th>'.esc_html__($label,'silver-duck').'</th>';
@@ -659,34 +825,39 @@ class Silver_Duck {
             echo '</tr>';
         }
         echo '</tbody></table>';
-    }
 
-    /* ------------------------------- helpers ------------------------------- */
+        $total_pages = max(1, (int) ceil($total / $per_page));
+        if ($total_pages > 1) {
+            $base_url = add_query_arg(array_filter([
+                'page'        => 'silver-duck-logs',
+                'decision'    => $decision ?: null,
+                'has_error'   => ($has_error !== '') ? $has_error : null,
+                'model'       => $model_q ?: null,
+                'comment_id'  => $comment_id ?: null,
+                'date_start'  => $date_start ?: null,
+                'date_end'    => $date_end ?: null,
+            ], function($v){ return $v !== null; }), admin_url('options-general.php'));
 
-    /** Split multi-line text into trimmed array (skip empties) */
-    protected function lines_to_list($text) {
-        $arr = array_map('trim', preg_split('/\R+/', (string)$text));
-        return array_values(array_filter($arr, function($x){ return $x !== ''; }));
-    }
+            $current  = $paged;
+            $prev     = max(1, $current - 1);
+            $next     = min($total_pages, $current + 1);
+            echo '<div class="tablenav"><div class="tablenav-pages">';
+            echo '<span class="displaying-num">'.esc_html(sprintf(_n('%s item', '%s items', $total, 'silver-duck'), number_format_i18n($total))).'</span> ';
+            echo '<span class="pagination-links">';
+            if ($current > 1) {
+                echo '<a class="button" href="'.esc_url(add_query_arg('paged', 1, $base_url)).'">&laquo;</a> ';
+                echo '<a class="button" href="'.esc_url(add_query_arg('paged', $prev, $base_url)).'">&lsaquo;</a> ';
+            }
+            echo '<span class="tablenav-paging-text">'.esc_html(sprintf(__('Page %1$s of %2$s','silver-duck'), number_format_i18n($current), number_format_i18n($total_pages))).'</span>';
+            if ($current < $total_pages) {
+                echo ' <a class="button" href="'.esc_url(add_query_arg('paged', $next, $base_url)).'">&rsaquo;</a>';
+                echo ' <a class="button" href="'.esc_url(add_query_arg('paged', $total_pages, $base_url)).'">&raquo;</a>';
+            }
+            echo '</span>';
+            echo '</div></div>';
+        }
 
-    /** Extract domain from email */
-    protected function email_domain($email) {
-        $at = strrpos($email, '@');
-        if ($at === false) return '';
-        return substr($email, $at+1);
-    }
-
-    /** Extract domain from URL */
-    protected function url_domain($url) {
-        $p = wp_parse_url($url);
-        return isset($p['host']) ? $p['host'] : '';
-    }
-
-    /** Normalize domain (lowercase, strip leading www.) */
-    protected function normalize_domain($domain) {
-        $d = strtolower(trim($domain));
-        if (strpos($d, 'www.') === 0) $d = substr($d, 4);
-        return $d;
+        echo '</div>';
     }
 
     /** Minimal disposable email domain set (extend via settings with your own blacklist too) */
@@ -742,8 +913,8 @@ class Silver_Duck {
 
     /** Extract simple keywords from a comment (lowercase, stopword-pruned) */
     protected function keywords_from_comment($text, $max = 12) {
-        $t = strtolower((string)$text);
-        $tokens = preg_split('/[^a-z0-9]+/i', $t, -1, PREG_SPLIT_NO_EMPTY);
+        $t = mb_strtolower((string)$text, 'UTF-8');
+        $tokens = preg_split('/[^\p{L}\p{N}]+/u', $t, -1, PREG_SPLIT_NO_EMPTY);
         $stop = array_flip([
                 'the','a','an','and','or','but','if','then','else','when','at','by','for','in','of','on','to','with','from','is','it','this','that','these','those','i','you','he','she','we','they','me','him','her','us','them','are','was','were','be','been','am','as','my','our','your','their'
         ]);
@@ -772,10 +943,10 @@ class Silver_Duck {
     /** Take a ~window of content around the first matching keyword */
     protected function window_around_keywords($text, $keywords, $win = 700) {
         if (empty($keywords)) return '';
-        $low = strtolower((string)$text);
+        $low = mb_strtolower((string)$text, 'UTF-8');
         $pos = -1;
         foreach ($keywords as $k) {
-            $p = mb_stripos($low, strtolower($k));
+            $p = mb_stripos($low, mb_strtolower($k, 'UTF-8'));
             if ($p !== false) { $pos = $p; break; }
         }
         if ($pos === -1) return '';

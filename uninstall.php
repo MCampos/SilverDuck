@@ -12,4 +12,4 @@ $table   = $wpdb->prefix . 'silver_duck_logs';
 delete_option($opt_key);
 
 // Drop logs table
-$wpdb->query("DROP TABLE IF EXISTS $table");
+$wpdb->query("DROP TABLE IF EXISTS `{$table}`");
