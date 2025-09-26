@@ -1,8 +1,8 @@
 <?php
 /**
- * Plugin Name: Silver Duck (OpenRouter - Llama 3.2)
+ * Plugin Name: Silver Duck Comment Classifier
  * Description: Classifies WordPress comments as spam/ham using OpenRouter Llama models. Includes admin settings, logs, heuristics (links/blacklists), author field checks (name/email/url), optional blog-post context for relevance, bulk recheck, and rate-limit backoff.
- * Version: 1.2.5
+ * Version: 1.2.6
  * Author: Matt Campos
  * License: GPL-2.0-or-later
  * Text Domain: silver-duck
@@ -132,13 +132,13 @@ class Silver_Duck {
                 26 // position near Comments
         );
 
-        // Settings submenu (points to main page)
+        // Settings submenu (separate slug, renders the same settings page)
         add_submenu_page(
                 'silver-duck',
                 __('Silver Duck Settings', 'silver-duck'),
                 __('Settings', 'silver-duck'),
                 self::CAP,
-                'silver-duck',
+                'silver-duck-settings',
                 [$this, 'render_settings_page']
         );
 
@@ -161,6 +161,9 @@ class Silver_Duck {
                 'silver-duck-logs',
                 [$this, 'render_logs_admin_page']
         );
+
+        // Hide the auto-added duplicate submenu that repeats the top-level page label
+        remove_submenu_page('silver-duck', 'silver-duck');
     }
 
     /** Register settings/sections/fields */
@@ -317,6 +320,29 @@ class Silver_Duck {
         ?>
         <div class="wrap">
             <h1><?php esc_html_e('Silver Duck Tools', 'silver-duck');?></h1>
+            <?php
+            // Admin notices for actions coming back to Tools
+            $decision   = isset($_GET['decision'])   ? sanitize_text_field((string) $_GET['decision']) : '';
+            $conf       = isset($_GET['conf'])       ? floatval($_GET['conf']) : null;
+            $err        = isset($_GET['error'])      ? sanitize_text_field((string) $_GET['error']) : '';
+            $rechecked  = isset($_GET['rechecked'])  ? intval($_GET['rechecked']) : 0;
+            $purged     = isset($_GET['purged'])     ? intval($_GET['purged']) : 0;
+
+            if ($err !== '') {
+                echo '<div class="notice notice-error is-dismissible"><p>'.esc_html__('Test error:', 'silver-duck').' '.esc_html($err).'</p></div>';
+            }
+            if ($decision !== '') {
+                $msg = sprintf(__('Test result: %1$s (confidence %2$.2f)', 'silver-duck'), $decision, ($conf !== null ? $conf : 0));
+                echo '<div class="notice notice-success is-dismissible"><p>'.esc_html($msg).'</p></div>';
+            }
+            if ($rechecked > 0) {
+                $msg = sprintf(_n('Rechecked %s pending comment', 'Rechecked %s pending comments', $rechecked, 'silver-duck'), number_format_i18n($rechecked));
+                echo '<div class="notice notice-success is-dismissible"><p>'.esc_html($msg).'</p></div>';
+            }
+            if ($purged) {
+                echo '<div class="notice notice-success is-dismissible"><p>'.esc_html__('Logs purged per retention setting.', 'silver-duck').'</p></div>';
+            }
+            ?>
             <div style="display:flex;gap:24px;flex-wrap:wrap;">
                 <div style="flex:1;min-width:380px;">
                     <h3><?php esc_html_e('Test a Comment', 'silver-duck');?></h3>
@@ -1028,6 +1054,46 @@ class Silver_Duck {
         $snippet = preg_replace('/^\S*\s/', '', $snippet); // drop partial first word
         $snippet = preg_replace('/\s\S*$/', '', $snippet); // drop partial last word
         return trim($snippet);
+    }
+
+    /** Convert multi-line textarea to a list of trimmed, non-empty lines */
+    protected function lines_to_list($text) {
+        $lines = preg_split("/[\r\n]+/", (string)$text);
+        $out = [];
+        foreach ($lines as $ln) {
+            $ln = trim($ln);
+            if ($ln !== '') $out[] = $ln;
+        }
+        return $out;
+    }
+
+    /** Extract domain from an email, lowercased */
+    protected function email_domain($email) {
+        $email = trim((string)$email);
+        if ($email === '' || strpos($email, '@') === false) return '';
+        $parts = explode('@', $email);
+        return $this->sd_mb_strtolower(trim(end($parts)));
+    }
+
+    /** Extract host from a URL, tolerant to missing scheme */
+    protected function url_domain($url) {
+        $u = trim((string)$url);
+        if ($u === '') return '';
+        $host = parse_url($u, PHP_URL_HOST);
+        if (!$host) {
+            $host = parse_url('http://'.$u, PHP_URL_HOST);
+        }
+        return $host ? $this->sd_mb_strtolower($host) : '';
+    }
+
+    /** Normalize a domain for comparisons */
+    protected function normalize_domain($domain) {
+        $d = $this->sd_mb_strtolower(trim((string)$domain));
+        if ($d === '') return '';
+        // strip trailing dot and leading www.
+        $d = rtrim($d, '.');
+        if (strpos($d, 'www.') === 0) $d = substr($d, 4);
+        return $d;
     }
 }
 
