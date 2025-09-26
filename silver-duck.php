@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Silver Duck Comment Classifier
  * Description: Classifies WordPress comments as spam/ham using OpenRouter Llama models. Includes admin settings, logs, heuristics (links/blacklists), author field checks (name/email/url), optional blog-post context for relevance, bulk recheck, and rate-limit backoff.
- * Version: 1.2.10
+ * Version: 1.2.11
  * Author: Matt Campos
  * License: GPL-2.0-or-later
  * Text Domain: silver-duck
@@ -981,48 +981,53 @@ class Silver_Duck {
                 echo '<pre class="sd-json" style="white-space:pre-wrap;word-break:break-word;">'.esc_html($modal['content']).'</pre>';
                 echo '</div></div>';
             }
-            echo '<style>
-                .sd-json .sd-json-key{color:#c7254e;font-weight:600;}
-                .sd-json .sd-json-string{color:#008000;}
-                .sd-json .sd-json-number{color:#1d6fdc;}
-                .sd-json .sd-json-boolean{color:#aa0d91;}
-                .sd-json .sd-json-null{color:#777;}
-            </style>
-            <script>
-            (function(){
-                function syntaxHighlight(json){
-                    json = json.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-                    return json.replace(/("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:\s*)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g, function(match){
-                        var cls = 'sd-json-number';
-                        if (/^"/.test(match)) {
-                            cls = /:$/.test(match) ? 'sd-json-key' : 'sd-json-string';
-                        } else if (/true|false/.test(match)) {
-                            cls = 'sd-json-boolean';
-                        } else if (/null/.test(match)) {
-                            cls = 'sd-json-null';
-                        }
-                        return '<span class="'+cls+'">'+match+'</span>';
-                    });
-                }
-                function formatElement(el){
-                    if (el.dataset.sdJsonProcessed) return;
-                    var text = el.textContent || '';
-                    if (!text.trim()) return;
-                    try {
-                        var parsed = JSON.parse(text);
-                        text = JSON.stringify(parsed, null, 2);
-                    } catch (e) {}
-                    el.innerHTML = syntaxHighlight(text);
-                    el.dataset.sdJsonProcessed = '1';
-                }
-                document.addEventListener('DOMContentLoaded', function(){
-                    document.querySelectorAll('.sd-json').forEach(formatElement);
-                    document.addEventListener('tb_show', function(){
-                        document.querySelectorAll('.sd-json').forEach(formatElement);
-                    });
-                });
-            })();
-            </script>';
+            $style = <<<'STYLE'
+<style>
+    .sd-json .sd-json-key{color:#c7254e;font-weight:600;}
+    .sd-json .sd-json-string{color:#008000;}
+    .sd-json .sd-json-number{color:#1d6fdc;}
+    .sd-json .sd-json-boolean{color:#aa0d91;}
+    .sd-json .sd-json-null{color:#777;}
+</style>
+STYLE;
+            $script = <<<'SCRIPT'
+<script>
+(function(){
+    function syntaxHighlight(json){
+        json = json.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        return json.replace(/("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:\s*)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g, function(match){
+            var cls = 'sd-json-number';
+            if (/^"/.test(match)) {
+                cls = /:$/.test(match) ? 'sd-json-key' : 'sd-json-string';
+            } else if (/true|false/.test(match)) {
+                cls = 'sd-json-boolean';
+            } else if (/null/.test(match)) {
+                cls = 'sd-json-null';
+            }
+            return '<span class="'+cls+'">'+match+'</span>';
+        });
+    }
+    function formatElement(el){
+        if (el.dataset.sdJsonProcessed) return;
+        var text = el.textContent || '';
+        if (!text.trim()) return;
+        try {
+            var parsed = JSON.parse(text);
+            text = JSON.stringify(parsed, null, 2);
+        } catch (e) {}
+        el.innerHTML = syntaxHighlight(text);
+        el.dataset.sdJsonProcessed = '1';
+    }
+    document.addEventListener('DOMContentLoaded', function(){
+        document.querySelectorAll('.sd-json').forEach(formatElement);
+        document.addEventListener('tb_show', function(){
+            document.querySelectorAll('.sd-json').forEach(formatElement);
+        });
+    });
+})();
+</script>
+SCRIPT;
+            echo $style . $script;
         }
 
         $total_pages = max(1, (int) ceil($total / $per_page));
