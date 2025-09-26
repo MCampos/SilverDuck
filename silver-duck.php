@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Silver Duck (OpenRouter - Llama 3.2)
  * Description: Classifies WordPress comments as spam/ham using OpenRouter Llama models. Includes admin settings, logs, heuristics (links/blacklists), author field checks (name/email/url), optional blog-post context for relevance, bulk recheck, and rate-limit backoff.
- * Version: 1.2.3
+ * Version: 1.2.4
  * Author: Matt Campos
  * License: GPL-2.0-or-later
  * Text Domain: silver-duck
@@ -121,17 +121,32 @@ class Silver_Duck {
 
     /** Admin menu */
     public function admin_menu() {
-        add_options_page(
+        // Top-level Comment Tools menu (main sidebar)
+        add_menu_page(
+                __('Comment Tools', 'silver-duck'),
+                __('Comment Tools', 'silver-duck'),
+                self::CAP,
+                'sd-comment-tools',
+                [$this, 'render_settings_page'],
+                'dashicons-admin-comments',
+                26 // position near Comments
+        );
+
+        // Silver Duck as a submenu under Comment Tools
+        add_submenu_page(
+                'sd-comment-tools',
                 __('Silver Duck', 'silver-duck'),
                 __('Silver Duck', 'silver-duck'),
                 self::CAP,
                 'silver-duck',
                 [$this, 'render_settings_page']
         );
+
+        // Logs as a submenu under Comment Tools
         add_submenu_page(
-                'options-general.php',
+                'sd-comment-tools',
                 __('Silver Duck Logs', 'silver-duck'),
-                __('Silver Duck Logs', 'silver-duck'),
+                __('Logs', 'silver-duck'),
                 self::CAP,
                 'silver-duck-logs',
                 [$this, 'render_logs_admin_page']
@@ -336,7 +351,7 @@ class Silver_Duck {
         $msg = $res['error']
                 ? 'error=' . rawurlencode($res['error'])
                 : 'decision=' . rawurlencode($res['decision']) . '&conf=' . rawurlencode($res['confidence']);
-        wp_safe_redirect(admin_url('options-general.php?page=silver-duck&' . $msg));
+        wp_safe_redirect(admin_url('admin.php?page=silver-duck&' . $msg));
         exit;
     }
 
@@ -345,7 +360,7 @@ class Silver_Duck {
         if (!current_user_can(self::CAP)) wp_die('Unauthorized', 403);
         check_admin_referer(self::NONCE);
         $this->purge_old_logs();
-        wp_safe_redirect(admin_url('options-general.php?page=silver-duck&purged=1'));
+        wp_safe_redirect(admin_url('admin.php?page=silver-duck&purged=1'));
         exit;
     }
 
@@ -360,7 +375,7 @@ class Silver_Duck {
             $this->evaluate_comment_for_action($c->comment_ID, (array)$c, false);
             $count++;
         }
-        wp_safe_redirect(admin_url('options-general.php?page=silver-duck&rechecked=' . intval($count)));
+        wp_safe_redirect(admin_url('admin.php?page=silver-duck&rechecked=' . intval($count)));
         exit;
     }
 
@@ -777,7 +792,7 @@ class Silver_Duck {
         echo '<h1>'.esc_html__('Silver Duck Logs', 'silver-duck').'</h1>';
 
         // Filter form
-        echo '<form method="get" action="'.esc_url(admin_url('options-general.php')).'" class="sd-log-filters">';
+        echo '<form method="get" action="'.esc_url(admin_url('admin.php')).'" class="sd-log-filters">';
         echo '<input type="hidden" name="page" value="silver-duck-logs" />';
         echo '<fieldset style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;margin:12px 0;">';
         // Decision
@@ -808,7 +823,7 @@ class Silver_Duck {
         echo '<input type="date" name="date_end" value="'.esc_attr($date_end).'" />';
         echo '</label>';
         echo '<button class="button button-primary" type="submit">'.esc_html__('Filter','silver-duck').'</button> ';
-        echo '<a class="button" href="'.esc_url(admin_url('options-general.php?page=silver-duck-logs')).'">'.esc_html__('Reset','silver-duck').'</a>';
+        echo '<a class="button" href="'.esc_url(admin_url('admin.php?page=silver-duck-logs')).'">'.esc_html__('Reset','silver-duck').'</a>';
         echo '</fieldset>';
         echo '</form>';
 
@@ -847,7 +862,7 @@ class Silver_Duck {
                 'comment_id'  => $comment_id ?: null,
                 'date_start'  => $date_start ?: null,
                 'date_end'    => $date_end ?: null,
-            ], function($v){ return $v !== null; }), admin_url('options-general.php'));
+            ], function($v){ return $v !== null; }), admin_url('admin.php'));
 
             $current  = $paged;
             $prev     = max(1, $current - 1);
