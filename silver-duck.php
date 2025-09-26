@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Silver Duck Comment Classifier
  * Description: Classifies WordPress comments as spam/ham using OpenRouter Llama models. Includes admin settings, logs, heuristics (links/blacklists), author field checks (name/email/url), optional blog-post context for relevance, bulk recheck, and rate-limit backoff.
- * Version: 1.2.16
+ * Version: 1.2.17
  * Author: Matt Campos
  * License: GPL-2.0-or-later
  * Text Domain: silver-duck
@@ -52,6 +52,7 @@ class Silver_Duck {
                 'timeout'               => 15,
                 'force_spam_on_llm'     => 0,
                 'auto_approve_valid'    => 0,
+            'auto_approve_url_less' => 0,
 
             // Content heuristics
                 'max_links'             => 2,
@@ -190,6 +191,7 @@ class Silver_Duck {
                 ['timeout', 'number', __('API timeout (seconds)', 'silver-duck')],
                 ['force_spam_on_llm', 'checkbox', __('Force "Spam" when LLM says spam', 'silver-duck')],
                 ['auto_approve_valid', 'checkbox', __('Auto-approve when LLM says valid', 'silver-duck')],
+                ['auto_approve_url_less', 'checkbox', __('Auto-approve valid comments with no URLs', 'silver-duck'), __('If enabled, comments that contain no links and receive a "valid" verdict will be auto-approved.', 'silver-duck')],
                 ['run_for_logged_in', 'checkbox', __('Also classify comments from logged-in users', 'silver-duck')],
         ];
         foreach ($core as $f) {
@@ -258,6 +260,7 @@ class Silver_Duck {
                 'timeout'               => max(3, intval($input['timeout'] ?? $d['timeout'])),
                 'force_spam_on_llm'     => empty($input['force_spam_on_llm']) ? 0 : 1,
                 'auto_approve_valid'    => empty($input['auto_approve_valid']) ? 0 : 1,
+                'auto_approve_url_less' => empty($input['auto_approve_url_less']) ? 0 : 1,
 
                 'max_links'             => max(0, intval($input['max_links'] ?? $d['max_links'])),
                 'blacklist'             => isset($input['blacklist']) ? sanitize_textarea_field($input['blacklist']) : '',
@@ -359,6 +362,9 @@ class Silver_Duck {
             $decision   = isset($_GET['decision'])   ? sanitize_text_field((string) $_GET['decision']) : '';
             $conf       = isset($_GET['conf'])       ? floatval($_GET['conf']) : null;
             $err        = isset($_GET['error'])      ? sanitize_text_field((string) $_GET['error']) : '';
+            $spam_moved = isset($_GET['spam_moved']) ? max(0, intval($_GET['spam_moved'])) : 0;
+            $hold_kept  = isset($_GET['hold_kept'])  ? max(0, intval($_GET['hold_kept'])) : 0;
+            $approved_c = isset($_GET['approved'])   ? max(0, intval($_GET['approved'])) : 0;
             $rechecked  = isset($_GET['rechecked'])  ? intval($_GET['rechecked']) : 0;
             $purged     = isset($_GET['purged'])     ? intval($_GET['purged']) : 0;
             $remaining  = isset($_GET['remaining'])  ? max(0, intval($_GET['remaining'])) : 0;
@@ -375,6 +381,36 @@ class Silver_Duck {
             if ($rechecked > 0) {
                 $msg = sprintf(_n('Rechecked %s pending comment', 'Rechecked %s pending comments', $rechecked, 'silver-duck'), number_format_i18n($rechecked));
                 echo '<div class="notice notice-success is-dismissible"><p>'.esc_html($msg).'</p></div>';
+            }
+            if ($spam_moved || $hold_kept || $approved_c) {
+                $items = [];
+                if ($spam_moved) {
+                    $items[] = sprintf(__('%s moved to spam', 'silver-duck'), number_format_i18n($spam_moved));
+                }
+                if ($hold_kept) {
+                    $items[] = sprintf(__('%s kept on hold', 'silver-duck'), number_format_i18n($hold_kept));
+                }
+                if ($approved_c) {
+                    $items[] = sprintf(__('%s approved', 'silver-duck'), number_format_i18n($approved_c));
+                }
+                $summary = implode(' · ', $items);
+                echo '<div class="notice notice-info is-dismissible"><p>'.esc_html__('Batch summary:', 'silver-duck').' '.esc_html($summary).'</p>';
+
+                $link_parts = [];
+                if ($spam_moved) {
+                    $link_parts[] = '<a href="'.esc_url(admin_url('edit-comments.php?comment_status=spam')).'">'.esc_html__('View Spam Queue', 'silver-duck').'</a>';
+                }
+                if ($hold_kept) {
+                    $link_parts[] = '<a href="'.esc_url(admin_url('edit-comments.php?comment_status=moderated')).'">'.esc_html__('View Pending Queue', 'silver-duck').'</a>';
+                }
+                if ($approved_c) {
+                    $link_parts[] = '<a href="'.esc_url(admin_url('edit-comments.php?comment_status=approved')).'">'.esc_html__('View Approved Comments', 'silver-duck').'</a>';
+                }
+                if ($link_parts) {
+                    $links_html = wp_kses(implode(' | ', $link_parts), [ 'a' => [ 'href' => [] ] ]);
+                    echo '<p class="description">'.$links_html.'</p>';
+                }
+                echo '</div>';
             }
             if ($purged) {
                 echo '<div class="notice notice-success is-dismissible"><p>'.esc_html__('Logs purged per retention setting.', 'silver-duck').'</p></div>';
@@ -463,6 +499,8 @@ class Silver_Duck {
         if (!current_user_can(self::CAP)) wp_die('Unauthorized', 403);
         check_admin_referer(self::NONCE);
 
+        $opts = wp_parse_args(get_option(self::OPT_KEY), self::defaults());
+
         // Batch controls
         $batch  = isset($_POST['batch'])  ? max(1, min(200, intval($_POST['batch']))) : 25;
         $offset = isset($_POST['offset']) ? max(0, intval($_POST['offset'])) : 0;
@@ -476,9 +514,24 @@ class Silver_Duck {
                 'order'    => 'ASC',
         ];
         $count = 0;
+        $moved_spam = 0;
+        $kept_hold = 0;
+        $approved = 0;
         $pending = get_comments($args);
         foreach ($pending as $c) {
-            $this->evaluate_comment_for_action($c->comment_ID, (array)$c, false);
+            $result = $this->evaluate_comment_for_action($c->comment_ID, (array)$c, false);
+
+            if ($result === 'spam') {
+                wp_spam_comment($c->comment_ID);
+                $moved_spam++;
+            } elseif ($result === 'hold') {
+                wp_set_comment_status($c->comment_ID, 'hold');
+                $kept_hold++;
+            } elseif ($result === 'approve') {
+                wp_set_comment_status($c->comment_ID, 'approve');
+                $approved++;
+            }
+
             $count++;
         }
 
@@ -493,6 +546,9 @@ class Silver_Duck {
                 'remaining'   => $remaining,
                 'next_offset' => $next_offset,
                 'batch'       => $batch,
+                'spam_moved'  => $moved_spam,
+                'hold_kept'   => $kept_hold,
+                'approved'    => $approved,
         ]);
         wp_safe_redirect(admin_url('admin.php?'.$qs));
         exit;
@@ -528,10 +584,13 @@ class Silver_Duck {
 
         if ($content === '') return 'hold';
 
+        $linkMatchesHttp = [];
+        $linkCountHttp = preg_match_all('#https?://#i', $content, $linkMatchesHttp);
+        $has_urls_in_content = $linkCountHttp > 0 || (bool) preg_match('#(?:https?://|www\.)#i', $content);
+
         // --- Heuristic: link count
         if (!$bypass_heuristics_for_bulk && $opts['max_links'] > 0) {
-            $linkCount = preg_match_all('#https?://#i', $content, $m);
-            if ($linkCount > $opts['max_links']) {
+            if ($linkCountHttp > $opts['max_links']) {
                 $this->log($comment_id, 'spam', 1.0000, $opts['model'], null, null, ['Too many links ('.$linkCount.')'], null, null);
                 return $opts['auto_action'];
             }
@@ -623,6 +682,7 @@ class Silver_Duck {
         }
         if ($decision === 'valid') {
             if (!empty($opts['auto_approve_valid'])) return 'approve';
+            if (!empty($opts['auto_approve_url_less']) && !$has_urls_in_content) return 'approve';
             return 'none';
         }
         return 'none';
