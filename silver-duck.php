@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Silver Duck Comment Classifier
  * Description: Classifies WordPress comments as spam/ham using OpenRouter Llama models. Includes admin settings, logs, heuristics (links/blacklists), author field checks (name/email/url), optional blog-post context for relevance, bulk recheck, and rate-limit backoff.
- * Version: 1.2.11
+ * Version: 1.2.12
  * Author: Matt Campos
  * License: GPL-2.0-or-later
  * Text Domain: silver-duck
@@ -599,13 +599,20 @@ class Silver_Duck {
         $opts    = wp_parse_args(get_option(self::OPT_KEY), self::defaults());
         $apiKey  = $opts['api_key'];
         $timeout = max(3, intval($opts['timeout']));
+        $json_flags = (defined('JSON_UNESCAPED_SLASHES') ? JSON_UNESCAPED_SLASHES : 0) |
+                      (defined('JSON_UNESCAPED_UNICODE') ? JSON_UNESCAPED_UNICODE : 0);
 
         // Rate-limit backoff
         $blockUntil = (int) get_transient(self::BLOCK_TRANSIENT);
         if ($blockUntil && $blockUntil > time()) {
             $untilStr = gmdate('c', $blockUntil);
             $decision='valid'; $confidence=0.50; $reasons=['rate-limited until '.$untilStr]; $error='rate_limited';
-            $this->log($comment_id, $decision, $confidence, $opts['model'], null, null, $reasons, null, $error);
+            $raw_block = wp_json_encode([
+                    'source'      => 'global_backoff_transient',
+                    'block_until' => $untilStr,
+            ], $json_flags);
+            if (!$raw_block) $raw_block = 'rate_limited until '.$untilStr;
+            $this->log($comment_id, $decision, $confidence, $opts['model'], null, null, $reasons, $raw_block, $error);
             return compact('decision','confidence','reasons','error');
         }
 
@@ -684,6 +691,13 @@ class Silver_Duck {
             $resp = wp_remote_post('https://openrouter.ai/api/v1/chat/completions', $args);
             if (is_wp_error($resp)) {
                 $error = $resp->get_error_message();
+                $raw = wp_json_encode([
+                        'error'   => 'wp_error',
+                        'code'    => $resp->get_error_code(),
+                        'message' => $error,
+                        'model'   => $model,
+                ], $json_flags);
+                if (!$raw) $raw = 'wp_error: '.$error;
                 continue;
             }
 
@@ -702,6 +716,18 @@ class Silver_Duck {
                 }
                 if ($until && $until > time()) {
                     set_transient(self::BLOCK_TRANSIENT, $until, max(1, $until - time()));
+                }
+                if (!is_string($raw) || trim($raw) === '') {
+                    $raw = wp_json_encode([
+                            'status' => 429,
+                            'body'   => $body,
+                            'headers'=> [
+                                    'retry-after'        => $retryAfter,
+                                    'x-ratelimit-reset'  => $reset,
+                            ],
+                            'model'  => $model,
+                    ], $json_flags);
+                    if (!$raw) $raw = '429 rate_limited';
                 }
                 $error = 'rate_limited';
                 break; // do not try other candidates when globally rate-limited
@@ -765,12 +791,27 @@ class Silver_Duck {
             $soonest = min($skipped_models);
             $latency = intval((microtime(true) - $start) * 1000);
             $untilStr = gmdate('c', $soonest);
-            $this->log($comment_id, 'valid', 0.5, $opts['model'], $tokens, $latency, ['all models backoff until '.$untilStr], $raw, 'rate_limited');
+            $raw_backoff = wp_json_encode([
+                    'error'              => 'all_models_backoff',
+                    'models'             => $skipped_models,
+                    'next_attempt_after' => $untilStr,
+            ], $json_flags);
+            if (!$raw_backoff) $raw_backoff = 'all models backoff until '.$untilStr;
+            $this->log($comment_id, 'valid', 0.5, $opts['model'], $tokens, $latency, ['all models backoff until '.$untilStr], $raw_backoff, 'rate_limited');
             return ['decision'=>'valid','confidence'=>0.5,'reasons'=>['rate-limited'],'error'=>'rate_limited'];
         }
 
         // Exhausted candidates → fail-safe
         $latency = intval((microtime(true) - $start) * 1000);
+        if (!$raw) {
+            $last_model = isset($model) ? $model : $opts['model'];
+            $raw = wp_json_encode([
+                    'error'   => $error ?: 'unavailable',
+                    'model'   => $last_model,
+                    'context' => 'llm unavailable fallback',
+            ], $json_flags);
+            if (!$raw) $raw = (string) ($error ?: 'unavailable');
+        }
         $this->log($comment_id, 'valid', 0.5, $opts['model'], $tokens, $latency, ['llm unavailable: '.$error], $raw, $error ?: 'unavailable');
         return ['decision'=>'valid','confidence'=>0.5,'reasons'=>['llm unavailable'],'error'=>$error ?: 'unavailable'];
     }
@@ -812,6 +853,20 @@ class Silver_Duck {
 
         $data['reasons'] = $reasons ? maybe_serialize($reasons) : null;
         $formats[] = '%s';
+
+        if ($raw_response === null || $raw_response === '') {
+            $fallback_payload = [
+                    'note'      => 'no raw response captured',
+                    'decision'  => $decision,
+                    'error'     => $error,
+                    'model'     => $model,
+                    'reasons'   => $reasons,
+            ];
+            $raw_response = wp_json_encode($fallback_payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+            if (!$raw_response) {
+                $raw_response = 'no raw response captured; error=' . (string) $error;
+            }
+        }
 
         $data['raw_response'] = $raw_response ? $this->sd_mb_substr($raw_response, 0, 64000) : null;
         $formats[] = '%s';
