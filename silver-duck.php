@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Silver Duck Comment Classifier
  * Description: Classifies WordPress comments as spam/ham using OpenRouter Llama models. Includes admin settings, logs, heuristics (links/blacklists), author field checks (name/email/url), optional blog-post context for relevance, bulk recheck, and rate-limit backoff.
- * Version: 1.2.6
+ * Version: 1.2.7
  * Author: Matt Campos
  * License: GPL-2.0-or-later
  * Text Domain: silver-duck
@@ -327,6 +327,9 @@ class Silver_Duck {
             $err        = isset($_GET['error'])      ? sanitize_text_field((string) $_GET['error']) : '';
             $rechecked  = isset($_GET['rechecked'])  ? intval($_GET['rechecked']) : 0;
             $purged     = isset($_GET['purged'])     ? intval($_GET['purged']) : 0;
+            $remaining  = isset($_GET['remaining'])  ? max(0, intval($_GET['remaining'])) : 0;
+            $next_off   = isset($_GET['next_offset'])? max(0, intval($_GET['next_offset'])) : 0;
+            $batch_q    = isset($_GET['batch'])      ? max(1, min(200, intval($_GET['batch']))) : 25;
 
             if ($err !== '') {
                 echo '<div class="notice notice-error is-dismissible"><p>'.esc_html__('Test error:', 'silver-duck').' '.esc_html($err).'</p></div>';
@@ -341,6 +344,18 @@ class Silver_Duck {
             }
             if ($purged) {
                 echo '<div class="notice notice-success is-dismissible"><p>'.esc_html__('Logs purged per retention setting.', 'silver-duck').'</p></div>';
+            }
+            if ($remaining > 0) {
+                $msg = sprintf(_n('%s pending comment remaining', '%s pending comments remaining', $remaining, 'silver-duck'), number_format_i18n($remaining));
+                echo '<div class="notice notice-info"><p>'.esc_html($msg).'</p>';
+                echo '<form method="post" action="'.esc_url(admin_url('admin-post.php')).'" style="margin:8px 0;display:inline-block">';
+                wp_nonce_field(self::NONCE);
+                echo '<input type="hidden" name="action" value="silver_duck_recheck_pending" />';
+                echo '<input type="hidden" name="offset" value="'.esc_attr($next_off).'" />';
+                echo '<input type="hidden" name="batch" value="'.esc_attr($batch_q).'" />';
+                echo '<button class="button button-primary">'.esc_html__('Run Next Batch', 'silver-duck').'</button> ';
+                echo '<a class="button" href="'.esc_url(admin_url('admin.php?page=silver-duck-tools')).'">'.esc_html__('Reset', 'silver-duck').'</a>';
+                echo '</form></div>';
             }
             ?>
             <div style="display:flex;gap:24px;flex-wrap:wrap;">
@@ -357,10 +372,17 @@ class Silver_Duck {
                 <div style="flex:1;min-width:320px;">
                     <h3><?php esc_html_e('Recheck Pending Comments', 'silver-duck');?></h3>
                     <p class="description"><?php esc_html_e('Re-runs classification for comments awaiting moderation (conservative: does not auto-change status).', 'silver-duck');?></p>
+                    <?php $batch_default = $batch_q; $offset_default = $next_off; ?>
                     <form method="post" action="<?php echo esc_url(admin_url('admin-post.php'));?>">
                         <?php wp_nonce_field(self::NONCE); ?>
                         <input type="hidden" name="action" value="silver_duck_recheck_pending" />
-                        <button class="button"><?php esc_html_e('Run Now', 'silver-duck');?></button>
+                        <p>
+                            <label><?php esc_html_e('Batch size', 'silver-duck');?>
+                                <input type="number" min="1" max="200" step="1" name="batch" value="<?php echo esc_attr($batch_default);?>" class="small-text" />
+                            </label>
+                            <input type="hidden" name="offset" value="<?php echo esc_attr($offset_default);?>" />
+                            <button class="button">&nbsp;<?php esc_html_e('Run Now', 'silver-duck');?></button>
+                        </p>
                     </form>
 
                     <h3 style="margin-top:24px;"><?php esc_html_e('Purge Logs', 'silver-duck');?></h3>
@@ -407,13 +429,38 @@ class Silver_Duck {
         if (!current_user_can(self::CAP)) wp_die('Unauthorized', 403);
         check_admin_referer(self::NONCE);
 
+        // Batch controls
+        $batch  = isset($_POST['batch'])  ? max(1, min(200, intval($_POST['batch']))) : 25;
+        $offset = isset($_POST['offset']) ? max(0, intval($_POST['offset'])) : 0;
+
+        // Fetch this batch of pending comments
+        $args = [
+                'status'   => 'hold',
+                'number'   => $batch,
+                'offset'   => $offset,
+                'orderby'  => 'comment_date_gmt',
+                'order'    => 'ASC',
+        ];
         $count = 0;
-        $pending = get_comments(['status' => 'hold', 'number' => 200, 'orderby' => 'comment_date_gmt', 'order' => 'ASC']);
+        $pending = get_comments($args);
         foreach ($pending as $c) {
             $this->evaluate_comment_for_action($c->comment_ID, (array)$c, false);
             $count++;
         }
-        wp_safe_redirect(admin_url('admin.php?page=silver-duck-tools&rechecked=' . intval($count)));
+
+        // Compute remaining and next offset
+        $total_pending = intval(get_comments(['status' => 'hold', 'count' => true]));
+        $next_offset   = $offset + $count;
+        $remaining     = max(0, $total_pending - $next_offset);
+
+        $qs = http_build_query([
+                'page'        => 'silver-duck-tools',
+                'rechecked'   => $count,
+                'remaining'   => $remaining,
+                'next_offset' => $next_offset,
+                'batch'       => $batch,
+        ]);
+        wp_safe_redirect(admin_url('admin.php?'.$qs));
         exit;
     }
 
@@ -604,7 +651,17 @@ class Silver_Duck {
                 "- Author URL: {$urlLine}\n\n".
                 "Comment:\n---\n".$text."\n---";
 
+        $skipped_models = [];
+        $attempted = false;
         foreach ($candidates as $model) {
+            // Per-model backoff check
+            $modelKey = $this->model_block_key($model);
+            $modelUntil = (int) get_transient($modelKey);
+            if ($modelUntil && $modelUntil > time()) {
+                $skipped_models[$model] = $modelUntil;
+                continue; // try next candidate
+            }
+            $attempted = true;
             $payload = [
                     'model'       => $model,
                     'temperature' => 0,
@@ -657,7 +714,8 @@ class Silver_Duck {
                 if (is_numeric($remaining) && intval($remaining) <= 0 && $reset && is_numeric($reset)) {
                     $until = (strlen($reset) > 10) ? (int) round(((float)$reset)/1000) : (int)$reset; // ms vs s
                     if ($until && $until > time()) {
-                        set_transient(self::BLOCK_TRANSIENT, $until, max(1, $until - time()));
+                        // Per-model backoff only (do not block all models on 2xx depletion)
+                        set_transient($modelKey, $until, max(1, $until - time()));
                     }
                 }
                 $json = json_decode($body, true);
@@ -700,6 +758,15 @@ class Silver_Duck {
 
             // Other non-2xx: try next
             $error = 'HTTP '.$code.' - '.substr($body, 0, 300);
+        }
+
+        // If all models were skipped due to per-model backoff, report rate-limited
+        if (!$attempted && !empty($skipped_models)) {
+            $soonest = min($skipped_models);
+            $latency = intval((microtime(true) - $start) * 1000);
+            $untilStr = gmdate('c', $soonest);
+            $this->log($comment_id, 'valid', 0.5, $opts['model'], $tokens, $latency, ['all models backoff until '.$untilStr], $raw, 'rate_limited');
+            return ['decision'=>'valid','confidence'=>0.5,'reasons'=>['rate-limited'],'error'=>'rate_limited'];
         }
 
         // Exhausted candidates → fail-safe
@@ -955,6 +1022,11 @@ class Silver_Duck {
             return mb_stripos((string)$haystack, (string)$needle, 0, 'UTF-8');
         }
         return stripos((string)$haystack, (string)$needle);
+    }
+
+    /** Build a safe transient key for per-model backoff */
+    protected function model_block_key($model) {
+        return 'silver_duck_block_until_' . substr(md5((string)$model), 0, 12);
     }
 
     /** Minimal disposable email domain set (extend via settings with your own blacklist too) */
