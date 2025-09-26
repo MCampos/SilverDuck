@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Silver Duck (OpenRouter - Llama 3.2)
  * Description: Classifies WordPress comments as spam/ham using OpenRouter Llama models. Includes admin settings, logs, heuristics (links/blacklists), author field checks (name/email/url), optional blog-post context for relevance, bulk recheck, and rate-limit backoff.
- * Version: 1.2.4
+ * Version: 1.2.5
  * Author: Matt Campos
  * License: GPL-2.0-or-later
  * Text Domain: silver-duck
@@ -121,30 +121,40 @@ class Silver_Duck {
 
     /** Admin menu */
     public function admin_menu() {
-        // Top-level Comment Tools menu (main sidebar)
+        // Top-level Silver Duck menu (main sidebar)
         add_menu_page(
-                __('Comment Tools', 'silver-duck'),
-                __('Comment Tools', 'silver-duck'),
+                __('Silver Duck', 'silver-duck'),
+                __('Silver Duck', 'silver-duck'),
                 self::CAP,
-                'sd-comment-tools',
+                'silver-duck',
                 [$this, 'render_settings_page'],
                 'dashicons-admin-comments',
                 26 // position near Comments
         );
 
-        // Silver Duck as a submenu under Comment Tools
+        // Settings submenu (points to main page)
         add_submenu_page(
-                'sd-comment-tools',
-                __('Silver Duck', 'silver-duck'),
-                __('Silver Duck', 'silver-duck'),
+                'silver-duck',
+                __('Silver Duck Settings', 'silver-duck'),
+                __('Settings', 'silver-duck'),
                 self::CAP,
                 'silver-duck',
                 [$this, 'render_settings_page']
         );
 
-        // Logs as a submenu under Comment Tools
+        // Tools submenu
         add_submenu_page(
-                'sd-comment-tools',
+                'silver-duck',
+                __('Silver Duck Tools', 'silver-duck'),
+                __('Tools', 'silver-duck'),
+                self::CAP,
+                'silver-duck-tools',
+                [$this, 'render_tools_page']
+        );
+
+        // Logs submenu under Silver Duck
+        add_submenu_page(
+                'silver-duck',
                 __('Silver Duck Logs', 'silver-duck'),
                 __('Logs', 'silver-duck'),
                 self::CAP,
@@ -297,10 +307,16 @@ class Silver_Duck {
                 submit_button(__('Save Settings', 'silver-duck'));
                 ?>
             </form>
+        </div>
+        <?php
+    }
 
-            <hr />
-
-            <h2><?php esc_html_e('Tools', 'silver-duck');?></h2>
+    /** Tools page */
+    public function render_tools_page() {
+        if (!current_user_can(self::CAP)) return;
+        ?>
+        <div class="wrap">
+            <h1><?php esc_html_e('Silver Duck Tools', 'silver-duck');?></h1>
             <div style="display:flex;gap:24px;flex-wrap:wrap;">
                 <div style="flex:1;min-width:380px;">
                     <h3><?php esc_html_e('Test a Comment', 'silver-duck');?></h3>
@@ -329,10 +345,6 @@ class Silver_Duck {
                     </form>
                 </div>
             </div>
-
-            <hr />
-            <h2><?php esc_html_e('Recent Classifications', 'silver-duck');?></h2>
-            <?php $this->render_logs_table(); ?>
         </div>
         <?php
     }
@@ -351,7 +363,7 @@ class Silver_Duck {
         $msg = $res['error']
                 ? 'error=' . rawurlencode($res['error'])
                 : 'decision=' . rawurlencode($res['decision']) . '&conf=' . rawurlencode($res['confidence']);
-        wp_safe_redirect(admin_url('admin.php?page=silver-duck&' . $msg));
+        wp_safe_redirect(admin_url('admin.php?page=silver-duck-tools&' . $msg));
         exit;
     }
 
@@ -360,7 +372,7 @@ class Silver_Duck {
         if (!current_user_can(self::CAP)) wp_die('Unauthorized', 403);
         check_admin_referer(self::NONCE);
         $this->purge_old_logs();
-        wp_safe_redirect(admin_url('admin.php?page=silver-duck&purged=1'));
+        wp_safe_redirect(admin_url('admin.php?page=silver-duck-tools&purged=1'));
         exit;
     }
 
@@ -375,7 +387,7 @@ class Silver_Duck {
             $this->evaluate_comment_for_action($c->comment_ID, (array)$c, false);
             $count++;
         }
-        wp_safe_redirect(admin_url('admin.php?page=silver-duck&rechecked=' . intval($count)));
+        wp_safe_redirect(admin_url('admin.php?page=silver-duck-tools&rechecked=' . intval($count)));
         exit;
     }
 
