@@ -3,7 +3,7 @@ Contributors: Matt Campos
 Tags: spam, comments, ai, llama, openrouter
 Requires at least: 5.8
 Tested up to: 6.6
-Stable tag: 1.2.15
+Stable tag: 1.2.16
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -76,6 +76,10 @@ Silver Duck fails safe: it logs the error, leaves the decision as “valid” wi
 * For unexpected behaviour, enable WP_DEBUG and capture logs, then open a GitHub issue with sanitized details.
 
 == Changelog ==
+= 1.2.16 =
+* Fix Groq fallback trigger when OpenRouter is globally rate limited.
+* Expand README instructions for installation, configuration, and troubleshooting.
+
 = 1.2.15 =
 * Added Groq fallback provider with dedicated settings and automatic retry when OpenRouter is throttled.
 * Enhanced logs to indicate which provider handled each classification.

@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Silver Duck Comment Classifier
  * Description: Classifies WordPress comments as spam/ham using OpenRouter Llama models. Includes admin settings, logs, heuristics (links/blacklists), author field checks (name/email/url), optional blog-post context for relevance, bulk recheck, and rate-limit backoff.
- * Version: 1.2.15
+ * Version: 1.2.16
  * Author: Matt Campos
  * License: GPL-2.0-or-later
  * Text Domain: silver-duck
@@ -667,9 +667,16 @@ class Silver_Duck {
                 'meta-llama/llama-3.2-3b-instruct:free',
         ])));
 
+        $groqEnabled = !empty($opts['groq_enabled']) && !empty($opts['groq_api_key']);
+
         // Global backoff for OpenRouter
         $blockUntil = (int) get_transient(self::BLOCK_TRANSIENT);
-        if ($blockUntil && $blockUntil > time()) {
+        $openrouterBlocked = $blockUntil && $blockUntil > time();
+        $last_error = null;
+        $last_raw   = null;
+        $last_tokens = null;
+
+        if ($openrouterBlocked && !$groqEnabled) {
             $untilStr = gmdate('c', $blockUntil);
             $reasons = ['rate-limited until '.$untilStr];
             $raw_block = wp_json_encode([
@@ -681,33 +688,41 @@ class Silver_Duck {
             return ['decision'=>'valid','confidence'=>0.5,'reasons'=>$reasons,'error'=>'rate_limited'];
         }
 
+        if ($openrouterBlocked && $groqEnabled) {
+            $untilStr = gmdate('c', $blockUntil);
+            $last_error = 'openrouter_rate_limited';
+            $last_raw = wp_json_encode([
+                    'provider'   => 'openrouter',
+                    'block_until'=> $untilStr,
+            ], $json_flags);
+            if (!$last_raw) $last_raw = 'openrouter rate_limited until '.$untilStr;
+        }
+
         $start = microtime(true);
-        $last_error = null;
-        $last_raw   = null;
-        $last_tokens = null;
         $attempted = false;
         $skipped_models = [];
 
-        foreach ($candidates as $model) {
-            $result = $this->attempt_openrouter_model($model, $system, $userPrompt, $opts['api_key'], $timeout, $start, $comment_id, $json_flags);
-            if ($result['status'] === 'skipped') {
-                $skipped_models[$model] = $result['until'];
-                continue;
-            }
-            if ($result['status'] === 'success') {
-                return $result['payload'];
-            }
-            $attempted = true;
-            $last_error  = $result['message'];
-            $last_raw    = $result['raw'];
-            $last_tokens = $result['tokens'];
-            if ($result['status'] === 'rate_limited') {
-                break; // no point trying more OpenRouter models
+        if (!$openrouterBlocked) {
+            foreach ($candidates as $model) {
+                $result = $this->attempt_openrouter_model($model, $system, $userPrompt, $opts['api_key'], $timeout, $start, $comment_id, $json_flags);
+                if ($result['status'] === 'skipped') {
+                    $skipped_models[$model] = $result['until'];
+                    continue;
+                }
+                if ($result['status'] === 'success') {
+                    return $result['payload'];
+                }
+                $attempted = true;
+                $last_error  = $result['message'];
+                $last_raw    = $result['raw'];
+                $last_tokens = $result['tokens'];
+                if ($result['status'] === 'rate_limited') {
+                    break; // no point trying more OpenRouter models
+                }
             }
         }
 
         // Groq fallback
-        $groqEnabled = !empty($opts['groq_enabled']) && !empty($opts['groq_api_key']);
         if ($groqEnabled) {
             $groqBlock = (int) get_transient(self::GROQ_BLOCK_TRANSIENT);
             if ($groqBlock && $groqBlock > time()) {
