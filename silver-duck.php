@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Silver Duck Comment Classifier
  * Description: Classifies WordPress comments as spam/ham using OpenRouter Llama models. Includes admin settings, logs, heuristics (links/blacklists), author field checks (name/email/url), optional blog-post context for relevance, bulk recheck, and rate-limit backoff.
- * Version: 1.2.14
+ * Version: 1.2.15
  * Author: Matt Campos
  * License: GPL-2.0-or-later
  * Text Domain: silver-duck
@@ -17,6 +17,7 @@ class Silver_Duck {
     const TABLE   = 'silver_duck_logs';
     const CAP     = 'manage_options';
     const BLOCK_TRANSIENT = 'silver_duck_block_until'; // site-wide backoff when 429s occur
+    const GROQ_BLOCK_TRANSIENT = 'silver_duck_groq_block_until';
 
     public function __construct() {
         register_activation_hook(__FILE__, [$this, 'activate']);
@@ -70,6 +71,11 @@ class Silver_Duck {
             // Ops
                 'log_retention_days'    => 30,
                 'run_for_logged_in'     => 0,
+
+            // Groq fallback
+                'groq_enabled'          => 0,
+                'groq_api_key'          => '',
+                'groq_model'            => 'llama-3.1-8b-instant',
         ];
     }
 
@@ -177,7 +183,7 @@ class Silver_Duck {
         add_settings_section('sd_core', __('Core Settings', 'silver-duck'), '__return_false', 'silver-duck');
         $core = [
                 ['enabled', 'checkbox', __('Enable classifier', 'silver-duck')],
-                ['api_key', 'password', __('OpenRouter API Key', 'silver-duck')],
+                ['api_key', 'password', __('OpenRouter API Key', 'silver-duck'), __('Leave blank to keep the existing key. Get an API key at openrouter.ai and keep it secret.', 'silver-duck')],
                 ['model', 'text', __('Model', 'silver-duck')],
                 ['confidence', 'number', __('Spam threshold (0–1)', 'silver-duck')],
                 ['auto_action', 'select', __('When labeled spam', 'silver-duck')],
@@ -186,7 +192,11 @@ class Silver_Duck {
                 ['auto_approve_valid', 'checkbox', __('Auto-approve when LLM says valid', 'silver-duck')],
                 ['run_for_logged_in', 'checkbox', __('Also classify comments from logged-in users', 'silver-duck')],
         ];
-        foreach ($core as $f) add_settings_field($f[0], $f[2], [$this, 'render_field'], 'silver-duck', 'sd_core', ['key' => $f[0], 'type' => $f[1]]);
+        foreach ($core as $f) {
+            $args = ['key' => $f[0], 'type' => $f[1]];
+            if (!empty($f[3])) $args['desc'] = $f[3];
+            add_settings_field($f[0], $f[2], [$this, 'render_field'], 'silver-duck', 'sd_core', $args);
+        }
 
         // Content heuristics
         add_settings_section('sd_rules', __('Content Heuristics', 'silver-duck'), function () {
@@ -218,6 +228,21 @@ class Silver_Duck {
         // Maintenance
         add_settings_section('sd_maintenance', __('Maintenance', 'silver-duck'), '__return_false', 'silver-duck');
         add_settings_field('log_retention_days', __('Log retention days', 'silver-duck'), [$this, 'render_field'], 'silver-duck', 'sd_maintenance', ['key' => 'log_retention_days', 'type' => 'number']);
+
+        // Groq fallback
+        add_settings_section('sd_groq', __('Groq Fallback', 'silver-duck'), function () {
+            echo '<p class="description">'.esc_html__('Configure Groq as a secondary provider when OpenRouter is unavailable or throttled.', 'silver-duck').'</p>';
+        }, 'silver-duck');
+        $groq_fields = [
+                ['groq_enabled', 'checkbox', __('Enable Groq fallback', 'silver-duck')],
+                ['groq_api_key', 'password', __('Groq API Key', 'silver-duck'), __('Leave blank to keep the existing key. Generate a key at console.groq.com and keep it secret.', 'silver-duck')],
+                ['groq_model', 'text', __('Groq model', 'silver-duck'), __('Example: llama-3.1-8b-instant', 'silver-duck')],
+        ];
+        foreach ($groq_fields as $f) {
+            $args = ['key' => $f[0], 'type' => $f[1]];
+            if (!empty($f[3])) $args['desc'] = $f[3];
+            add_settings_field($f[0], $f[2], [$this, 'render_field'], 'silver-duck', 'sd_groq', $args);
+        }
     }
 
     /** Sanitize options */
@@ -248,6 +273,10 @@ class Silver_Duck {
 
                 'log_retention_days'    => max(0, intval($input['log_retention_days'] ?? $d['log_retention_days'])),
                 'run_for_logged_in'     => empty($input['run_for_logged_in']) ? 0 : 1,
+
+                'groq_enabled'          => empty($input['groq_enabled']) ? 0 : 1,
+                'groq_api_key'          => isset($input['groq_api_key']) && trim($input['groq_api_key']) !== '' ? trim($input['groq_api_key']) : (string)($prev['groq_api_key'] ?? ''),
+                'groq_model'            => isset($input['groq_model']) ? sanitize_text_field($input['groq_model']) : $d['groq_model'],
         ];
     }
 
@@ -267,7 +296,9 @@ class Silver_Duck {
             printf('<input type="password" class="regular-text" name="%1$s[%2$s]" value="" autocomplete="new-password" placeholder="%3$s" />',
                     esc_attr(self::OPT_KEY), esc_attr($k), $opts[$k] ? esc_attr(str_repeat('•', 8)) : ''
             );
-            echo '<p class="description">'.esc_html__('Leave blank to keep the existing key. Get an API key at openrouter.ai and keep it secret.', 'silver-duck').'</p>';
+            if (!empty($args['desc'])) {
+                echo '<p class="description">'.esc_html($args['desc']).'</p>';
+            }
             return;
         }
         if ($type === 'number') {
@@ -294,6 +325,9 @@ class Silver_Duck {
         printf('<input type="text" class="regular-text" name="%1$s[%2$s]" value="%3$s" />',
                 esc_attr(self::OPT_KEY), esc_attr($k), esc_attr($opts[$k])
         );
+        if (!empty($args['desc'])) {
+            echo '<p class="description">'.esc_html($args['desc']).'</p>';
+        }
     }
 
     /** Settings page */
@@ -594,43 +628,12 @@ class Silver_Duck {
         return 'none';
     }
 
-    /** LLM call with 429 handling + fallback; includes metadata + post context in the prompt */
+    /** LLM call with OpenRouter primary + Groq fallback. Includes metadata + post context in the prompt. */
     protected function classify_text($text, $comment_id=null, $is_test=false, $meta = []) {
         $opts    = wp_parse_args(get_option(self::OPT_KEY), self::defaults());
-        $apiKey  = $opts['api_key'];
         $timeout = max(3, intval($opts['timeout']));
         $json_flags = (defined('JSON_UNESCAPED_SLASHES') ? JSON_UNESCAPED_SLASHES : 0) |
                       (defined('JSON_UNESCAPED_UNICODE') ? JSON_UNESCAPED_UNICODE : 0);
-
-        // Rate-limit backoff
-        $blockUntil = (int) get_transient(self::BLOCK_TRANSIENT);
-        if ($blockUntil && $blockUntil > time()) {
-            $untilStr = gmdate('c', $blockUntil);
-            $decision='valid'; $confidence=0.50; $reasons=['rate-limited until '.$untilStr]; $error='rate_limited';
-            $raw_block = wp_json_encode([
-                    'source'      => 'global_backoff_transient',
-                    'block_until' => $untilStr,
-            ], $json_flags);
-            if (!$raw_block) $raw_block = 'rate_limited until '.$untilStr;
-            $this->log($comment_id, $decision, $confidence, $opts['model'], null, null, $reasons, $raw_block, $error);
-            return compact('decision','confidence','reasons','error');
-        }
-
-        $start = microtime(true);
-        $error = null; $decision='valid'; $confidence=0.50; $reasons=[]; $raw=null; $tokens=null;
-
-        if (!$apiKey) {
-            $error = 'Missing OpenRouter API key.';
-            $this->log($comment_id, 'valid', $confidence, $opts['model'], $tokens, null, $reasons, $raw, $error);
-            return compact('decision','confidence','reasons','error');
-        }
-
-        // Model candidates (saved model first)
-        $candidates = array_values(array_unique(array_filter([
-                $opts['model'],
-                'meta-llama/llama-4-maverick:free',
-                'meta-llama/llama-3.2-3b-instruct:free',
-        ])));
 
         $author = trim($meta['author'] ?? '');
         $email  = trim($meta['email']  ?? '');
@@ -658,162 +661,245 @@ class Silver_Duck {
                 "- Author URL: {$urlLine}\n\n".
                 "Comment:\n---\n".$text."\n---";
 
-        $skipped_models = [];
-        $attempted = false;
-        foreach ($candidates as $model) {
-            // Per-model backoff check
-            $modelKey = $this->model_block_key($model);
-            $modelUntil = (int) get_transient($modelKey);
-            if ($modelUntil && $modelUntil > time()) {
-                $skipped_models[$model] = $modelUntil;
-                continue; // try next candidate
-            }
-            $attempted = true;
-            $payload = [
-                    'model'       => $model,
-                    'temperature' => 0,
-                    'max_tokens'  => 48,
-                    'messages'    => [
-                            ['role' => 'system', 'content' => $system],
-                            ['role' => 'user',   'content' => $userPrompt],
-                    ],
-            ];
+        $candidates = array_values(array_unique(array_filter([
+                $opts['model'],
+                'meta-llama/llama-4-maverick:free',
+                'meta-llama/llama-3.2-3b-instruct:free',
+        ])));
 
-            $args = [
-                    'headers' => [
-                            'Authorization' => 'Bearer ' . $apiKey,
-                            'Content-Type'  => 'application/json',
-                    ],
-                    'body'    => wp_json_encode($payload),
-                    'timeout' => $timeout,
-            ];
-
-            $resp = wp_remote_post('https://openrouter.ai/api/v1/chat/completions', $args);
-            if (is_wp_error($resp)) {
-                $error = $resp->get_error_message();
-                $raw = wp_json_encode([
-                        'error'   => 'wp_error',
-                        'code'    => $resp->get_error_code(),
-                        'message' => $error,
-                        'model'   => $model,
-                ], $json_flags);
-                if (!$raw) $raw = 'wp_error: '.$error;
-                continue;
-            }
-
-            $code = wp_remote_retrieve_response_code($resp);
-            $body = wp_remote_retrieve_body($resp);
-            $raw  = $body;
-
-            if ($code == 429) {
-                $retryAfter = wp_remote_retrieve_header($resp, 'retry-after');
-                $reset      = wp_remote_retrieve_header($resp, 'x-ratelimit-reset');
-                $until = null;
-                if ($retryAfter && is_numeric($retryAfter)) {
-                    $until = time() + (int)$retryAfter;
-                } elseif ($reset && is_numeric($reset)) {
-                    $until = (strlen($reset) > 10) ? (int) round(((float)$reset)/1000) : (int)$reset;
-                }
-                if ($until && $until > time()) {
-                    set_transient(self::BLOCK_TRANSIENT, $until, max(1, $until - time()));
-                }
-                if (!is_string($raw) || trim($raw) === '') {
-                    $raw = wp_json_encode([
-                            'status' => 429,
-                            'body'   => $body,
-                            'headers'=> [
-                                    'retry-after'        => $retryAfter,
-                                    'x-ratelimit-reset'  => $reset,
-                            ],
-                            'model'  => $model,
-                    ], $json_flags);
-                    if (!$raw) $raw = '429 rate_limited';
-                }
-                $error = 'rate_limited';
-                break; // do not try other candidates when globally rate-limited
-            }
-
-            if ($code >= 200 && $code < 300) {
-                // Respect rate-limit headers even on 2xx: if remaining hits 0, back off until reset
-                $remaining = wp_remote_retrieve_header($resp, 'x-ratelimit-remaining');
-                $reset     = wp_remote_retrieve_header($resp, 'x-ratelimit-reset');
-                if (is_numeric($remaining) && intval($remaining) <= 0 && $reset && is_numeric($reset)) {
-                    $until = (strlen($reset) > 10) ? (int) round(((float)$reset)/1000) : (int)$reset; // ms vs s
-                    if ($until && $until > time()) {
-                        // Per-model backoff only (do not block all models on 2xx depletion)
-                        set_transient($modelKey, $until, max(1, $until - time()));
-                    }
-                }
-                $json = json_decode($body, true);
-                $tokens = 0;
-                $content = '';
-                if (is_array($json)) {
-                    $tokens = intval($json['usage']['total_tokens'] ?? 0);
-                    if (isset($json['choices']) && is_array($json['choices']) && isset($json['choices'][0]) && is_array($json['choices'][0])) {
-                        $choice0 = $json['choices'][0];
-                        if (isset($choice0['message']) && is_array($choice0['message'])) {
-                            $content = (string)($choice0['message']['content'] ?? '');
-                        } elseif (isset($choice0['text'])) {
-                            $content = (string)$choice0['text'];
-                        }
-                    }
-                }
-
-                $content = trim($content);
-                if (preg_match('/\{.*\}/s', $content, $m)) $content = $m[0];
-                $parsed = json_decode($content, true);
-
-                if (is_array($parsed) && isset($parsed['label'])) {
-                    $decision   = (strtolower(trim($parsed['label'])) === 'spam') ? 'spam' : 'valid';
-                    $confidence = isset($parsed['confidence']) ? floatval($parsed['confidence']) : 0.5;
-                    $reasons    = is_array($parsed['reasons'] ?? null) ? array_slice(array_map('strval', $parsed['reasons']), 0, 6) : [];
-                } else {
-                    // fallback parse
-                    $low = $this->sd_mb_strtolower((string)$content);
-                    if (strpos($low, 'spam') !== false && strpos($low, 'valid') === false) {
-                        $decision = 'spam'; $confidence = 0.85; $reasons = ['fallback parse'];
-                    } else {
-                        $decision = 'valid'; $confidence = 0.55; $reasons = ['fallback parse'];
-                    }
-                }
-
-                $latency = intval((microtime(true) - $start) * 1000);
-                $this->log($comment_id, $decision, $confidence, $model, $tokens, $latency, $reasons, $raw, null);
-                return compact('decision','confidence','reasons','error');
-            }
-
-            // Other non-2xx: try next
-            $error = 'HTTP '.$code.' - '.substr($body, 0, 300);
+        // Global backoff for OpenRouter
+        $blockUntil = (int) get_transient(self::BLOCK_TRANSIENT);
+        if ($blockUntil && $blockUntil > time()) {
+            $untilStr = gmdate('c', $blockUntil);
+            $reasons = ['rate-limited until '.$untilStr];
+            $raw_block = wp_json_encode([
+                    'provider'   => 'openrouter',
+                    'block_until'=> $untilStr,
+            ], $json_flags);
+            if (!$raw_block) $raw_block = 'openrouter rate_limited until '.$untilStr;
+            $this->log($comment_id, 'valid', 0.50, $opts['model'], null, null, $reasons, $raw_block, 'rate_limited');
+            return ['decision'=>'valid','confidence'=>0.5,'reasons'=>$reasons,'error'=>'rate_limited'];
         }
 
-        // If all models were skipped due to per-model backoff, report rate-limited
+        $start = microtime(true);
+        $last_error = null;
+        $last_raw   = null;
+        $last_tokens = null;
+        $attempted = false;
+        $skipped_models = [];
+
+        foreach ($candidates as $model) {
+            $result = $this->attempt_openrouter_model($model, $system, $userPrompt, $opts['api_key'], $timeout, $start, $comment_id, $json_flags);
+            if ($result['status'] === 'skipped') {
+                $skipped_models[$model] = $result['until'];
+                continue;
+            }
+            if ($result['status'] === 'success') {
+                return $result['payload'];
+            }
+            $attempted = true;
+            $last_error  = $result['message'];
+            $last_raw    = $result['raw'];
+            $last_tokens = $result['tokens'];
+            if ($result['status'] === 'rate_limited') {
+                break; // no point trying more OpenRouter models
+            }
+        }
+
+        // Groq fallback
+        $groqEnabled = !empty($opts['groq_enabled']) && !empty($opts['groq_api_key']);
+        if ($groqEnabled) {
+            $groqBlock = (int) get_transient(self::GROQ_BLOCK_TRANSIENT);
+            if ($groqBlock && $groqBlock > time()) {
+                $last_error = 'groq_rate_limited';
+                $last_raw = wp_json_encode([
+                        'provider'   => 'groq',
+                        'block_until'=> gmdate('c', $groqBlock),
+                ], $json_flags);
+            } else {
+                $groqResult = $this->attempt_groq_model($system, $userPrompt, $opts['groq_api_key'], $opts['groq_model'], $timeout, $start, $comment_id, $json_flags);
+                if ($groqResult['status'] === 'success') {
+                    return $groqResult['payload'];
+                }
+                $last_error  = $groqResult['message'];
+                $last_raw    = $groqResult['raw'];
+                $last_tokens = $groqResult['tokens'];
+            }
+        }
+
         if (!$attempted && !empty($skipped_models)) {
             $soonest = min($skipped_models);
             $latency = intval((microtime(true) - $start) * 1000);
             $untilStr = gmdate('c', $soonest);
             $raw_backoff = wp_json_encode([
+                    'provider'           => 'openrouter',
                     'error'              => 'all_models_backoff',
                     'models'             => $skipped_models,
                     'next_attempt_after' => $untilStr,
             ], $json_flags);
             if (!$raw_backoff) $raw_backoff = 'all models backoff until '.$untilStr;
-            $this->log($comment_id, 'valid', 0.5, $opts['model'], $tokens, $latency, ['all models backoff until '.$untilStr], $raw_backoff, 'rate_limited');
+            $this->log($comment_id, 'valid', 0.5, $opts['model'], $last_tokens, $latency, ['all models backoff until '.$untilStr], $raw_backoff, 'rate_limited');
             return ['decision'=>'valid','confidence'=>0.5,'reasons'=>['rate-limited'],'error'=>'rate_limited'];
         }
 
-        // Exhausted candidates → fail-safe
         $latency = intval((microtime(true) - $start) * 1000);
-        if (!$raw) {
-            $last_model = isset($model) ? $model : $opts['model'];
-            $raw = wp_json_encode([
-                    'error'   => $error ?: 'unavailable',
-                    'model'   => $last_model,
-                    'context' => 'llm unavailable fallback',
-            ], $json_flags);
-            if (!$raw) $raw = (string) ($error ?: 'unavailable');
+        $raw = $last_raw ?: wp_json_encode([
+                'error'   => $last_error ?: 'unavailable',
+                'context' => 'llm unavailable fallback',
+        ], $json_flags);
+        if (!$raw) $raw = (string) ($last_error ?: 'unavailable');
+        $this->log($comment_id, 'valid', 0.5, $opts['model'], $last_tokens, $latency, ['llm unavailable: '.$last_error], $raw, $last_error ?: 'unavailable');
+        return ['decision'=>'valid','confidence'=>0.5,'reasons'=>['llm unavailable'],'error'=>$last_error ?: 'unavailable'];
+    }
+
+    /** Attempt a single OpenRouter model. */
+    protected function attempt_openrouter_model($model, $system, $userPrompt, $apiKey, $timeout, $start, $comment_id, $json_flags) {
+        if (!$apiKey) {
+            return ['status' => 'error', 'message' => 'Missing OpenRouter API key', 'raw' => null, 'tokens' => null];
         }
-        $this->log($comment_id, 'valid', 0.5, $opts['model'], $tokens, $latency, ['llm unavailable: '.$error], $raw, $error ?: 'unavailable');
-        return ['decision'=>'valid','confidence'=>0.5,'reasons'=>['llm unavailable'],'error'=>$error ?: 'unavailable'];
+
+        $modelKey = $this->model_block_key($model);
+        $blockUntil = (int) get_transient($modelKey);
+        if ($blockUntil && $blockUntil > time()) {
+            return ['status' => 'skipped', 'until' => $blockUntil, 'raw' => null, 'tokens' => null, 'message' => 'per-model backoff'];
+        }
+
+        $payload = [
+                'model'       => $model,
+                'temperature' => 0,
+                'max_tokens'  => 80,
+                'messages'    => [
+                        ['role' => 'system', 'content' => $system],
+                        ['role' => 'user',   'content' => $userPrompt],
+                ],
+        ];
+
+        $resp = wp_remote_post('https://openrouter.ai/api/v1/chat/completions', [
+                'headers' => [
+                        'Authorization' => 'Bearer ' . $apiKey,
+                        'Content-Type'  => 'application/json',
+                ],
+                'body'    => wp_json_encode($payload),
+                'timeout' => $timeout,
+        ]);
+
+        if (is_wp_error($resp)) {
+            return ['status' => 'error', 'message' => $resp->get_error_message(), 'raw' => null, 'tokens' => null];
+        }
+
+        $code = wp_remote_retrieve_response_code($resp);
+        $body = wp_remote_retrieve_body($resp);
+        $raw  = $body;
+
+        if ($code == 429) {
+            $until = $this->extract_retry_until($resp);
+            if ($until) {
+                set_transient(self::BLOCK_TRANSIENT, $until, max(1, $until - time()));
+            }
+            return ['status' => 'rate_limited', 'message' => 'openrouter_rate_limited', 'raw' => $raw, 'tokens' => null];
+        }
+
+        if ($code >= 200 && $code < 300) {
+            $json = json_decode($body, true);
+            $tokens = intval($json['usage']['total_tokens'] ?? 0);
+            $content = '';
+            if (isset($json['choices'][0]['message']['content'])) {
+                $content = (string)$json['choices'][0]['message']['content'];
+            } elseif (isset($json['choices'][0]['text'])) {
+                $content = (string)$json['choices'][0]['text'];
+            }
+            $parsed = $this->parse_model_output($content);
+            $latency = intval((microtime(true) - $start) * 1000);
+            $this->log($comment_id, $parsed['decision'], $parsed['confidence'], $model, $tokens, $latency, $parsed['reasons'], $raw, null);
+            return ['status' => 'success', 'payload' => ['decision'=>$parsed['decision'],'confidence'=>$parsed['confidence'],'reasons'=>$parsed['reasons']]];
+        }
+
+        return ['status' => 'error', 'message' => 'openrouter_http_'.$code, 'raw' => $raw, 'tokens' => null];
+    }
+
+    /** Attempt Groq completion via OpenAI-compatible endpoint. */
+    protected function attempt_groq_model($system, $userPrompt, $apiKey, $model, $timeout, $start, $comment_id, $json_flags) {
+        if (!$apiKey) {
+            return ['status' => 'error', 'message' => 'Missing Groq API key', 'raw' => null, 'tokens' => null];
+        }
+
+        $resp = wp_remote_post('https://api.groq.com/openai/v1/chat/completions', [
+                'headers' => [
+                        'Authorization' => 'Bearer ' . $apiKey,
+                        'Content-Type'  => 'application/json',
+                ],
+                'body'    => wp_json_encode([
+                        'model'       => $model,
+                        'temperature' => 0,
+                        'max_tokens'  => 80,
+                        'messages'    => [
+                                ['role' => 'system', 'content' => $system],
+                                ['role' => 'user',   'content' => $userPrompt],
+                        ],
+                ]),
+                'timeout' => $timeout,
+        ]);
+
+        if (is_wp_error($resp)) {
+            return ['status' => 'error', 'message' => $resp->get_error_message(), 'raw' => null, 'tokens' => null];
+        }
+
+        $code = wp_remote_retrieve_response_code($resp);
+        $body = wp_remote_retrieve_body($resp);
+        $raw  = $body;
+
+        if ($code == 429) {
+            $until = $this->extract_retry_until($resp);
+            if ($until) {
+                set_transient(self::GROQ_BLOCK_TRANSIENT, $until, max(1, $until - time()));
+            }
+            return ['status' => 'error', 'message' => 'groq_rate_limited', 'raw' => $raw, 'tokens' => null];
+        }
+
+        if ($code >= 200 && $code < 300) {
+            $json = json_decode($body, true);
+            $tokens = intval($json['usage']['total_tokens'] ?? 0);
+            $content = isset($json['choices'][0]['message']['content']) ? (string)$json['choices'][0]['message']['content'] : '';
+            $parsed = $this->parse_model_output($content);
+            $latency = intval((microtime(true) - $start) * 1000);
+            $this->log($comment_id, $parsed['decision'], $parsed['confidence'], 'groq:'.$model, $tokens, $latency, $parsed['reasons'], $raw, null);
+            return ['status' => 'success', 'payload' => ['decision'=>$parsed['decision'],'confidence'=>$parsed['confidence'],'reasons'=>$parsed['reasons']]];
+        }
+
+        return ['status' => 'error', 'message' => 'groq_http_'.$code, 'raw' => $raw, 'tokens' => null];
+    }
+
+    /** Parse JSON-ish model output, returning decision/confidence/reasons */
+    protected function parse_model_output($content) {
+        $content = trim((string)$content);
+        if (preg_match('/\{.*\}/s', $content, $m)) {
+            $content = $m[0];
+        }
+        $parsed = json_decode($content, true);
+        if (is_array($parsed) && isset($parsed['label'])) {
+            $decision = (strtolower(trim($parsed['label'])) === 'spam') ? 'spam' : 'valid';
+            $confidence = isset($parsed['confidence']) ? floatval($parsed['confidence']) : 0.5;
+            $reasons = is_array($parsed['reasons'] ?? null) ? array_slice(array_map('strval', $parsed['reasons']), 0, 6) : [];
+            return compact('decision','confidence','reasons');
+        }
+        $low = $this->sd_mb_strtolower($content);
+        if (strpos($low, 'spam') !== false && strpos($low, 'valid') === false) {
+            return ['decision'=>'spam','confidence'=>0.85,'reasons'=>['fallback parse']];
+        }
+        return ['decision'=>'valid','confidence'=>0.55,'reasons'=>['fallback parse']];
+    }
+
+    /** Extract retry-until timestamp from HTTP headers */
+    protected function extract_retry_until($resp) {
+        $retryAfter = wp_remote_retrieve_header($resp, 'retry-after');
+        $reset      = wp_remote_retrieve_header($resp, 'x-ratelimit-reset');
+        $until = null;
+        if ($retryAfter && is_numeric($retryAfter)) {
+            $until = time() + (int)$retryAfter;
+        } elseif ($reset && is_numeric($reset)) {
+            $until = (strlen($reset) > 10) ? (int) round(((float)$reset)/1000) : (int)$reset;
+        }
+        return $until;
     }
 
     /** Logging helper */
