@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Silver Duck Comment Classifier
  * Description: Classifies WordPress comments as spam/ham using OpenRouter Llama models. Includes admin settings, logs, heuristics (links/blacklists), author field checks (name/email/url), optional blog-post context for relevance, bulk recheck, and rate-limit backoff.
- * Version: 1.2.7
+ * Version: 1.2.10
  * Author: Matt Campos
  * License: GPL-2.0-or-later
  * Text Domain: silver-duck
@@ -813,7 +813,7 @@ class Silver_Duck {
         $data['reasons'] = $reasons ? maybe_serialize($reasons) : null;
         $formats[] = '%s';
 
-        $data['raw_response'] = $raw_response ? $this->sd_mb_substr($raw_response, 0, 5000) : null;
+        $data['raw_response'] = $raw_response ? $this->sd_mb_substr($raw_response, 0, 64000) : null;
         $formats[] = '%s';
 
         $data['error'] = $error ? $this->sd_mb_substr($error, 0, 1000) : null;
@@ -850,7 +850,7 @@ class Silver_Duck {
         if ($date_start && !preg_match('/^\d{4}-\d{2}-\d{2}$/', $date_start)) $date_start = '';
         if ($date_end   && !preg_match('/^\d{4}-\d{2}-\d{2}$/', $date_end))   $date_end   = '';
 
-        $per_page = 50;
+        $per_page = isset($_GET['per_page']) ? max(10, min(200, intval($_GET['per_page']))) : 50;
         $paged = isset($_GET['paged']) ? max(1, intval($_GET['paged'])) : 1;
         $offset = ($paged - 1) * $per_page;
 
@@ -895,6 +895,7 @@ class Silver_Duck {
 
         echo '<div class="wrap">';
         echo '<h1>'.esc_html__('Silver Duck Logs', 'silver-duck').'</h1>';
+        add_thickbox();
 
         // Filter form
         echo '<form method="get" action="'.esc_url(admin_url('admin.php')).'" class="sd-log-filters">';
@@ -927,6 +928,9 @@ class Silver_Duck {
         echo '<label>'.esc_html__('To', 'silver-duck').'<br/>';
         echo '<input type="date" name="date_end" value="'.esc_attr($date_end).'" />';
         echo '</label>';
+        echo '<label>'.esc_html__('Rows per page', 'silver-duck').'<br/>';
+        echo '<input type="number" name="per_page" min="10" max="200" step="10" value="'.esc_attr($per_page).'" class="small-text" />';
+        echo '</label>';
         echo '<button class="button button-primary" type="submit">'.esc_html__('Filter','silver-duck').'</button> ';
         echo '<a class="button" href="'.esc_url(admin_url('admin.php?page=silver-duck-logs')).'">'.esc_html__('Reset','silver-duck').'</a>';
         echo '</fieldset>';
@@ -939,8 +943,9 @@ class Silver_Duck {
         }
 
         echo '<p class="description">'.esc_html__('Browse classification logs.', 'silver-duck').'</p>';
+        $modalResponses = [];
         echo '<table class="widefat striped"><thead><tr>';
-        $cols = ['created_at'=>'Time','comment_id'=>'Comment','decision'=>'Decision','confidence'=>'Conf.','latency_ms'=>'Latency','model'=>'Model','tokens'=>'Tokens','error'=>'Error'];
+        $cols = ['created_at'=>'Time','comment_id'=>'Comment','decision'=>'Decision','confidence'=>'Conf.','latency_ms'=>'Latency','model'=>'Model','tokens'=>'Tokens','error'=>'Error','response'=>'Response'];
         foreach ($cols as $k=>$label) echo '<th>'.esc_html__($label,'silver-duck').'</th>';
         echo '</tr></thead><tbody>';
         foreach ($rows as $r) {
@@ -953,9 +958,72 @@ class Silver_Duck {
             echo '<td>'.esc_html($r['model']).'</td>';
             echo '<td>'.esc_html((int)$r['tokens']).'</td>';
             echo '<td>'.($r['error'] ? '<code>'.esc_html($r['error']).'</code>' : '').'</td>';
+            if (!empty($r['raw_response'])) {
+                $modal_id = 'sd-log-response-' . (int)$r['id'];
+                $decoded = json_decode($r['raw_response'], true);
+                $formatted = $decoded !== null ? wp_json_encode($decoded, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) : $r['raw_response'];
+                $preview = $this->sd_mb_substr($formatted, 0, 80);
+                $modalResponses[] = ['id' => $modal_id, 'content' => $formatted];
+                $link = '#TB_inline?width=700&height=550&inlineId=' . $modal_id;
+                $needs_ellipsis = $this->sd_mb_strlen($formatted) > 80;
+                echo '<td><a class="thickbox" href="'.esc_url($link).'">'.esc_html__('View', 'silver-duck').'</a><br/><code>'.esc_html($preview).($needs_ellipsis ? '…' : '').'</code></td>';
+            } else {
+                echo '<td>-</td>';
+            }
             echo '</tr>';
         }
         echo '</tbody></table>';
+
+        if (!empty($modalResponses)) {
+            foreach ($modalResponses as $modal) {
+                echo '<div id="'.esc_attr($modal['id']).'" style="display:none;">';
+                echo '<div style="max-height:70vh;overflow:auto;">';
+                echo '<pre class="sd-json" style="white-space:pre-wrap;word-break:break-word;">'.esc_html($modal['content']).'</pre>';
+                echo '</div></div>';
+            }
+            echo '<style>
+                .sd-json .sd-json-key{color:#c7254e;font-weight:600;}
+                .sd-json .sd-json-string{color:#008000;}
+                .sd-json .sd-json-number{color:#1d6fdc;}
+                .sd-json .sd-json-boolean{color:#aa0d91;}
+                .sd-json .sd-json-null{color:#777;}
+            </style>
+            <script>
+            (function(){
+                function syntaxHighlight(json){
+                    json = json.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                    return json.replace(/("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:\s*)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g, function(match){
+                        var cls = 'sd-json-number';
+                        if (/^"/.test(match)) {
+                            cls = /:$/.test(match) ? 'sd-json-key' : 'sd-json-string';
+                        } else if (/true|false/.test(match)) {
+                            cls = 'sd-json-boolean';
+                        } else if (/null/.test(match)) {
+                            cls = 'sd-json-null';
+                        }
+                        return '<span class="'+cls+'">'+match+'</span>';
+                    });
+                }
+                function formatElement(el){
+                    if (el.dataset.sdJsonProcessed) return;
+                    var text = el.textContent || '';
+                    if (!text.trim()) return;
+                    try {
+                        var parsed = JSON.parse(text);
+                        text = JSON.stringify(parsed, null, 2);
+                    } catch (e) {}
+                    el.innerHTML = syntaxHighlight(text);
+                    el.dataset.sdJsonProcessed = '1';
+                }
+                document.addEventListener('DOMContentLoaded', function(){
+                    document.querySelectorAll('.sd-json').forEach(formatElement);
+                    document.addEventListener('tb_show', function(){
+                        document.querySelectorAll('.sd-json').forEach(formatElement);
+                    });
+                });
+            })();
+            </script>';
+        }
 
         $total_pages = max(1, (int) ceil($total / $per_page));
         if ($total_pages > 1) {
@@ -967,6 +1035,7 @@ class Silver_Duck {
                 'comment_id'  => $comment_id ?: null,
                 'date_start'  => $date_start ?: null,
                 'date_end'    => $date_end ?: null,
+                'per_page'    => $per_page !== 50 ? $per_page : null,
             ], function($v){ return $v !== null; }), admin_url('admin.php'));
 
             $current  = $paged;
