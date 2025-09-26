@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Silver Duck Comment Classifier
  * Description: Classifies WordPress comments as spam/ham using OpenRouter Llama models. Includes admin settings, logs, heuristics (links/blacklists), author field checks (name/email/url), optional blog-post context for relevance, bulk recheck, and rate-limit backoff.
- * Version: 1.2.13
+ * Version: 1.2.14
  * Author: Matt Campos
  * License: GPL-2.0-or-later
  * Text Domain: silver-duck
