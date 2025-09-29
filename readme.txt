@@ -3,7 +3,7 @@ Contributors: Matt Campos
 Tags: spam, comments, ai, llama, openrouter
 Requires at least: 5.8
 Tested up to: 6.6
-Stable tag: 1.2.17
+Stable tag: 1.2.18
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -76,6 +76,10 @@ Silver Duck fails safe: it logs the error, leaves the decision as “valid” wi
 * For unexpected behaviour, enable WP_DEBUG and capture logs, then open a GitHub issue with sanitized details.
 
 == Changelog ==
+= 1.2.18 =
+* Fix WordPress i18n sniffs: add translators comments for strings with placeholders and correct non-literal translation usage in logs table.
+* Bump plugin version and stable tag.
+
 = 1.2.17 =
 * Added option to auto-approve valid comments that contain no URLs.
 * Recheck batch notice now links directly to Spam/Pending/Approved queues.

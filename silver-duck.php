@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Silver Duck Comment Classifier
  * Description: Classifies WordPress comments as spam/ham using OpenRouter Llama models. Includes admin settings, logs, heuristics (links/blacklists), author field checks (name/email/url), optional blog-post context for relevance, bulk recheck, and rate-limit backoff.
- * Version: 1.2.17
+ * Version: 1.2.18
  * Author: Matt Campos
  * License: GPL-2.0-or-later
  * Text Domain: silver-duck
@@ -375,22 +375,27 @@ class Silver_Duck {
                 echo '<div class="notice notice-error is-dismissible"><p>'.esc_html__('Test error:', 'silver-duck').' '.esc_html($err).'</p></div>';
             }
             if ($decision !== '') {
+                // translators: 1: decision label (e.g., "spam", "hold", "approve"); 2: confidence score formatted as a decimal (e.g., 0.87)
                 $msg = sprintf(__('Test result: %1$s (confidence %2$.2f)', 'silver-duck'), $decision, ($conf !== null ? $conf : 0));
                 echo '<div class="notice notice-success is-dismissible"><p>'.esc_html($msg).'</p></div>';
             }
             if ($rechecked > 0) {
+                // translators: %s is the number of pending comments rechecked
                 $msg = sprintf(_n('Rechecked %s pending comment', 'Rechecked %s pending comments', $rechecked, 'silver-duck'), number_format_i18n($rechecked));
                 echo '<div class="notice notice-success is-dismissible"><p>'.esc_html($msg).'</p></div>';
             }
             if ($spam_moved || $hold_kept || $approved_c) {
                 $items = [];
                 if ($spam_moved) {
+                    // translators: %s is the number of comments moved to spam
                     $items[] = sprintf(__('%s moved to spam', 'silver-duck'), number_format_i18n($spam_moved));
                 }
                 if ($hold_kept) {
+                    // translators: %s is the number of comments kept on hold
                     $items[] = sprintf(__('%s kept on hold', 'silver-duck'), number_format_i18n($hold_kept));
                 }
                 if ($approved_c) {
+                    // translators: %s is the number of comments approved
                     $items[] = sprintf(__('%s approved', 'silver-duck'), number_format_i18n($approved_c));
                 }
                 $summary = implode(' · ', $items);
@@ -416,6 +421,7 @@ class Silver_Duck {
                 echo '<div class="notice notice-success is-dismissible"><p>'.esc_html__('Logs purged per retention setting.', 'silver-duck').'</p></div>';
             }
             if ($remaining > 0) {
+                // translators: %s is the number of pending comments remaining
                 $msg = sprintf(_n('%s pending comment remaining', '%s pending comments remaining', $remaining, 'silver-duck'), number_format_i18n($remaining));
                 echo '<div class="notice notice-info"><p>'.esc_html($msg).'</p>';
                 echo '<form method="post" action="'.esc_url(admin_url('admin-post.php')).'" style="margin:8px 0;display:inline-block">';
@@ -1161,8 +1167,19 @@ class Silver_Duck {
         echo '<p class="description">'.esc_html__('Browse classification logs.', 'silver-duck').'</p>';
         $modalResponses = [];
         echo '<table class="widefat striped"><thead><tr>';
-        $cols = ['created_at'=>'Time','comment_id'=>'Comment','decision'=>'Decision','confidence'=>'Conf.','latency_ms'=>'Latency','model'=>'Model','tokens'=>'Tokens','error'=>'Error','response'=>'Response'];
-        foreach ($cols as $k=>$label) echo '<th>'.esc_html__($label,'silver-duck').'</th>';
+        // Translate column labels at definition time; escape at render time to satisfy sniff
+        $cols = [
+            'created_at' => __('Time', 'silver-duck'),
+            'comment_id' => __('Comment', 'silver-duck'),
+            'decision'   => __('Decision', 'silver-duck'),
+            'confidence' => __('Conf.', 'silver-duck'),
+            'latency_ms' => __('Latency', 'silver-duck'),
+            'model'      => __('Model', 'silver-duck'),
+            'tokens'     => __('Tokens', 'silver-duck'),
+            'error'      => __('Error', 'silver-duck'),
+            'response'   => __('Response', 'silver-duck'),
+        ];
+        foreach ($cols as $k=>$label) echo '<th>'.esc_html($label).'</th>';
         echo '</tr></thead><tbody>';
         foreach ($rows as $r) {
             echo '<tr>';
@@ -1263,12 +1280,14 @@ SCRIPT;
             $prev     = max(1, $current - 1);
             $next     = min($total_pages, $current + 1);
             echo '<div class="tablenav"><div class="tablenav-pages">';
+            // translators: %s is the number of items in the table
             echo '<span class="displaying-num">'.esc_html(sprintf(_n('%s item', '%s items', $total, 'silver-duck'), number_format_i18n($total))).'</span> ';
             echo '<span class="pagination-links">';
             if ($current > 1) {
                 echo '<a class="button" href="'.esc_url(add_query_arg('paged', 1, $base_url)).'">&laquo;</a> ';
                 echo '<a class="button" href="'.esc_url(add_query_arg('paged', $prev, $base_url)).'">&lsaquo;</a> ';
             }
+            // translators: 1: current page number; 2: total page count
             echo '<span class="tablenav-paging-text">'.esc_html(sprintf(__('Page %1$s of %2$s','silver-duck'), number_format_i18n($current), number_format_i18n($total_pages))).'</span>';
             if ($current < $total_pages) {
                 echo ' <a class="button" href="'.esc_url(add_query_arg('paged', $next, $base_url)).'">&rsaquo;</a>';
